@@ -1,5 +1,10 @@
 // Bookish app.js (pure serverless variant)
 
+import { initSyncManager, startSync, stopSync, getSyncStatusForUI, triggerPersistenceCheck } from './sync_manager.js';
+import * as storageManager from './core/storage_manager.js';
+import uiStatusManager from './ui_status_manager.js';
+import { getAccountStatus } from './account_ui.js';
+
 // --- DOM refs ---
 const statusEl = document.getElementById('status');
 // status banner removed; we now write a single status line into the geek panel
@@ -27,14 +32,6 @@ const fundRetryBtn = document.getElementById('fundRetry');
 const accountBtn = document.getElementById('accountBtn');
 const accountPanel = document.getElementById('accountPanel');
 const accountClose = document.getElementById('accountClose');
-const acctAddr = document.getElementById('acctAddr');
-const acctCopy = document.getElementById('acctCopy');
-const acctL1 = document.getElementById('acctL1');
-const acctCost = document.getElementById('acctCost');
-const acctMsg = document.getElementById('acctMsg');
-let lastFundTxHash=null;
-const acctFundAddrResolved = document.getElementById('acctFundAddrResolved');
-const acctNodeUrlDisplay = document.getElementById('acctNodeUrlDisplay');
 const form = document.getElementById('entryForm');
 const coverFileInput = document.getElementById('hiddenCoverInput');
 const coverPreview = document.getElementById('coverPreview');
@@ -44,13 +41,34 @@ const saveBtn = document.getElementById('saveBtn');
 const deleteBtn = document.getElementById('deleteBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const newBtn = document.getElementById('newBtn');
+// Phase 2: First-run experience refs
+const emptyAddBookBtn = document.getElementById('emptyAddBookBtn');
+const celebrationToast = document.getElementById('celebrationToast');
+const accountNudgeBanner = document.getElementById('accountNudgeBanner');
+const nudgeDismissBtn = document.getElementById('nudgeDismissBtn');
+const nudgeCreateAccountBtn = document.getElementById('nudgeCreateAccountBtn');
 if(tileCoverClick && coverFileInput){ tileCoverClick.addEventListener('click',()=>coverFileInput.click()); }
 
 // --- State ---
-let entries=[]; let syncing=false; let replaying=false; let initialSynced=false;
+let entries=[]; let replaying=false;
 const SERVERLESS=true;
 let browserClient; let keyState={ loaded:false };
+
+// Export reset function for logout
+export function resetKeyState() {
+  keyState.loaded = false;
+  browserClient = null;
+}
+let walletError = null; // Track wallet errors for UI status manager
 window.BOOKISH_DEBUG=true; function dbg(...a){ if(window.BOOKISH_DEBUG) console.debug('[Bookish]',...a); }
+
+/**
+ * Get balance status for UI status manager
+ * @returns {Object} { error }
+ */
+function getBalanceStatus() {
+  return { error: walletError };
+}
 
 // --- Utility / ordering ---
 function setStatus(m){ statusEl.textContent=m; if(window.BOOKISH_DEBUG) console.debug('[Bookish] status:', m); }
@@ -83,8 +101,9 @@ function openModal(entry){
   updateDirty();
   if(window.bookSearch) window.bookSearch.handleModalOpen(!!entry);
 }
-function closeModal(){ modal.classList.remove('active'); form.reset(); coverPreview.style.display='none'; delete form.dataset.orig; saveBtn.disabled=true; }
-window.bookishApp={ openModal };
+function closeModal(){ modal.classList.remove('active'); form.reset(); coverPreview.style.display='none'; delete form.dataset.orig; saveBtn.disabled=true; if(window.bookSearch) window.bookSearch.handleModalOpen(true); }
+function clearBooks(){ entries=[]; render(); }
+window.bookishApp={ openModal, clearBooks };
 // Dirty tracking helpers
 function currentFormState(){ return JSON.stringify({
   prior: form.priorTxid.value||'',
@@ -147,7 +166,7 @@ fundClose?.addEventListener('click', closeFundingModal);
 fundCopyBtn?.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(fundAddrEl.textContent||''); fundMsgEl.textContent='Address copied'; }catch{} });
 fundRefreshBtn?.addEventListener('click', ()=> refreshFundingInfo());
 fundDoBtn?.addEventListener('click', async ()=>{
-  fundDoBtn.disabled=true; fundMsgEl.textContent='Funding…';
+  fundDoBtn.disabled=true; fundMsgEl.textContent='Funding...';
   try{
     if(!lastPendingOp) throw new Error('no-pending');
     const bytes = await (browserClient?.estimateEntryBytes?.(lastPendingOp.payload) || window.bookishEstimate?.entryBytes?.(lastPendingOp.payload));
@@ -162,7 +181,7 @@ fundDoBtn?.addEventListener('click', async ()=>{
 fundRetryBtn?.addEventListener('click', async ()=>{
   if(!lastPendingOp){ fundMsgEl.textContent='Nothing to retry.'; return; }
   closeFundingModal();
-  setStatus('Retrying publish…');
+  uiStatusManager.refresh();
   try{
     if(lastPendingOp.type==='create'){
       await createServerless(lastPendingOp.payload);
@@ -170,60 +189,85 @@ fundRetryBtn?.addEventListener('click', async ()=>{
       await editServerless(lastPendingOp.priorTxid, lastPendingOp.payload);
     }
     lastPendingOp=null;
-  }catch{ setStatus('Retry failed'); }
+  }catch{ walletError='Retry failed'; uiStatusManager.refresh(); }
 });
 
 // --- Account panel logic ---
-function openAccount(){ if(accountPanel) accountPanel.style.display='block'; refreshAccountInfo().catch(()=>{}); }
+// Account UI handles all updates via account_ui.js
+function openAccount(){ if(accountPanel) accountPanel.style.display='block'; }
 function closeAccount(){ if(accountPanel) accountPanel.style.display='none'; }
-async function refreshAccountInfo(){
-  try{
-    await (window.bookishWallet?.ensure?.());
-    const addr = await (window.bookishWallet?.getAddress?.());
-    if(addr) acctAddr.textContent = addr;
-  const balWei = await (window.bookishWallet?.getBalance?.());
-  if(balWei!=null){ const eth = Number(balWei)/1e18; acctL1.textContent = eth.toFixed(6)+' ETH'; }
-    // Irys balance removed from UI
-    // Node URL display
-    try{
-      const url = (window.bookishIrys?.getNodeUrl?.()) || '';
-      if(url) acctNodeUrlDisplay.textContent = url;
-    }catch{}
-    // Resolve funding address for manual on-chain funding (best-effort)
-    try{
-      const url = (window.bookishIrys?.getNodeUrl?.());
-      const token = (window.bookishIrys?.getToken?.()) || 'base-eth';
-      let addrResolved = null;
-      if(url){
-        const info = await fetch(url+`/info`).then(r=>r.ok?r.json():null).catch(()=>null);
-        const map = (info && (info.addresses||info.fundingAddresses||info.wallets||info.currencies))||{};
-        if(map[token]?.address) addrResolved = map[token].address; else if(typeof map[token]==='string') addrResolved = map[token];
-      }
-      if(acctFundAddrResolved) acctFundAddrResolved.textContent = addrResolved || '—';
-    }catch{}
-    acctMsg.textContent = '';
-  }catch(e){ acctMsg.textContent = 'Unable to refresh balances'; }
-}
 accountBtn?.addEventListener('click', openAccount);
 if(accountBtn){ accountBtn.onclick = openAccount; }
 accountClose?.addEventListener('click', closeAccount);
-acctCopy?.addEventListener('click', async ()=>{ try{ await navigator.clipboard.writeText(acctAddr.textContent||''); acctMsg.textContent='Address copied'; }catch{} });
 
 // No settings UI anymore; defaults used
+
+// --- Phase 2: First-run experience functions ---
+export function showCelebrationToast(){
+  const celebrated = localStorage.getItem('bookish.firstBookCelebrated');
+  if(celebrated) return; // Already shown
+
+  if(celebrationToast){
+    celebrationToast.style.display='flex';
+    localStorage.setItem('bookish.firstBookCelebrated', 'true');
+    setTimeout(()=>{
+      if(celebrationToast){
+        celebrationToast.classList.add('hiding');
+        setTimeout(()=>{
+          if(celebrationToast){
+            celebrationToast.style.display='none';
+            celebrationToast.classList.remove('hiding');
+          }
+        }, 300);
+      }
+    }, 3000);
+  }
+}
+
+export function showAccountNudge(){
+  // Don't show if logged in
+  if(storageManager.isLoggedIn()) return;
+
+  // Don't show if dismissed
+  const dismissed = localStorage.getItem('bookish.accountNudgeDismissed');
+  if(dismissed) return;
+
+  // Only show if 3+ books
+  if(entries.length < 3) return;
+
+  if(accountNudgeBanner){
+    accountNudgeBanner.style.display='flex';
+  }
+}
+
+export function hideAccountNudge(){
+  if(accountNudgeBanner){
+    accountNudgeBanner.style.display='none';
+  }
+}
 
 // --- Render ---
 function markDeletingVisual(entry){ entry._deleting=true; entry._committed=false; const el=document.querySelector('.card[data-txid="'+entry.txid+'"]'); if(el){ el.classList.add('deleting'); el.style.pointerEvents='none'; el.style.opacity='0.35'; } }
 function render(){
   cardsEl.innerHTML='';
-  if(!entries.length){ emptyEl.style.display='block'; return; } else emptyEl.style.display='none';
+  if(!entries.length){ emptyEl.style.display='block'; hideAccountNudge(); return; } else emptyEl.style.display='none';
+
+  // Check if should show account nudge (only if not logged in)
+  if(storageManager.isLoggedIn()){
+    hideAccountNudge();
+  } else {
+    showAccountNudge();
+  }
   for(const e of entries){
     if(e.status==='tombstoned') continue;
     const div=document.createElement('div');
     const rawFmt=(e.format||'').toLowerCase(); let fmtVariant=rawFmt==='audiobook'?'audio':(rawFmt==='ebook'?'ebook':'print');
     div.className='card'+(e._deleting?' deleting':''); div.dataset.txid=e.txid; div.dataset.fmt=fmtVariant; div.dataset.format=rawFmt;
-    const dotClass=e._committed?'':'local'; const dateDisp=formatDisplayDate(e.dateRead);
+    const dotClass = (!e.txid) ? 'local' : (e.onArweave ? 'arweave' : 'irys');
+    const dotTitle = (!e.txid) ? 'Local only - not uploaded' : (e.onArweave ? 'Permanent on Arweave' : 'On Irys - settling to Arweave...');
+    const dateDisp=formatDisplayDate(e.dateRead);
     div.innerHTML=`
-      <div class="status-dot ${dotClass}" ${networkStatusMode?"":"style=\"display:none\""} title="${dotClass==='local'?'Local only / unknown':'Confirmed (pending propagation)'}"></div>
+      <div class="status-dot ${dotClass}" title="${dotTitle}"></div>
       <div class="cover">${e.coverImage?`<img src="data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}">`:'<span style="font-size:.55rem;opacity:.4">NO COVER</span>'}</div>
       <div class="meta">
         <p class="title">${e.title||'<i>Untitled</i>'}</p>
@@ -233,43 +277,64 @@ function render(){
     div.onclick=()=>{ if(!e._deleting) openModal(e); };
     cardsEl.appendChild(div);
   }
-  // Update dots based on network status mode
-  setTimeout(updateNetDots,0);
+  // Update book status dots
+  setTimeout(updateBookDots, 0);
 }
 
-let networkStatusMode=false;
-async function updateNetDots(){
-  if(!networkStatusMode){
-    // revert to local-only indicator
-    for(const e of entries){
-      const card = cardsEl.querySelector(`.card[data-txid="${e.txid}"]`); if(!card) continue;
-      const dot = card.querySelector('.status-dot'); if(!dot) continue;
-      dot.style.display='none';
-      dot.classList.remove('irys','arweave');
-      dot.classList.add('local');
-      dot.title='Local only / unknown';
-    }
-    return;
-  }
-  const ops=[];
+/**
+ * Update book status dots with smart probing
+ * Only probes entries that have txid but aren't confirmed on Arweave yet
+ */
+async function updateBookDots(){
   for(const e of entries){
-    if(!e.txid) continue;
-    const card = cardsEl.querySelector(`.card[data-txid="${e.txid}"]`); if(!card) continue;
-    const dot = card.querySelector('.status-dot'); if(!dot) continue;
-    dot.style.display='block';
-    ops.push((async()=>{
-      try{
-        const rec = await (window.bookishNet?.probeAvailability?.(e.txid));
-        dot.classList.remove('local','irys','arweave');
-        if(rec?.arweave){ dot.classList.add('arweave'); dot.title='Visible on Arweave (final)'; }
-        else if(rec?.irys){ dot.classList.add('irys'); dot.title='Seen via Irys (fast path)'; }
-        else { dot.classList.add('local'); dot.title='Local only / unknown'; }
-      }catch{
-        dot.classList.remove('irys','arweave'); dot.classList.add('local'); dot.title='Local only / unknown';
-      }
-    })());
+    const card = cardsEl.querySelector(`.card[data-txid="${e.txid}"]`);
+    if(!card) continue;
+    const dot = card.querySelector('.status-dot');
+    if(!dot) continue;
+
+    // Set color based on current state
+    dot.classList.remove('local','irys','arweave');
+
+    if(!e.txid) {
+      // Local only - not uploaded
+      dot.classList.add('local');
+      dot.title = 'Local only - not uploaded';
+    } else if(e.onArweave) {
+      // Final state - on Arweave, stop checking
+      dot.classList.add('arweave');
+      dot.title = 'Permanent on Arweave';
+    } else {
+      // On Irys - check if reached Arweave
+      dot.classList.add('irys');
+      dot.title = 'On Irys - settling to Arweave...';
+
+      // Probe in background (only for entries needing it)
+      probeAndUpdateDot(e, dot);
+    }
   }
-  await Promise.allSettled(ops);
+}
+
+/**
+ * Probe Arweave availability and update entry state
+ */
+async function probeAndUpdateDot(entry, dot) {
+  try {
+    const rec = await window.bookishNet?.probeAvailability?.(entry.txid);
+    if(rec?.arweave) {
+      // Reached Arweave - persist this flag so we stop probing
+      entry.onArweave = true;
+      if(window.bookishCache) {
+        await window.bookishCache.putEntry(entry);
+      }
+      // Update dot immediately
+      dot.classList.remove('irys');
+      dot.classList.add('arweave');
+      dot.title = 'Permanent on Arweave';
+    }
+  } catch(err) {
+    // Probe failed - will retry on next update
+    console.debug('[Bookish] Arweave probe failed for', entry.txid, err);
+  }
 }
 
 // --- Diagnostics status line (inside geek panel) ---
@@ -288,8 +353,8 @@ function diagSet(items){
   diagIdle=false;
 }
 function diagClear(){ diagItems=[]; if(diagTimer) clearInterval(diagTimer); diagTimer=null; diagRender(); diagIdle=true; }
-function diagMaybeSet(items){ try{ if(typeof networkStatusMode!=='undefined' && networkStatusMode) diagSet(items); }catch{} }
-function diagMaybeClear(){ try{ if(typeof networkStatusMode!=='undefined' && networkStatusMode) diagClear(); }catch{} }
+function diagMaybeSet(items){ diagSet(items); }
+function diagMaybeClear(){ diagClear(); }
 
 function fmtCountdown(ms){ if(ms<=0) return 'now'; const s=Math.ceil(ms/1000); return s+'s'; }
 function diagIdleSeed(){
@@ -301,8 +366,10 @@ function diagIdleSeed(){
   const probeIn = Math.max(0, nextProbeAt - now);
   const inflightIrys = (window.bookishNet?.irysInFlight)||0;
   const inflightAr = (window.bookishNet?.arweaveInFlight)||0;
-  const probePart = inflightAr>0 ? 'Probing Arweave now…' : (probeIn<=0 ? 'Probing Arweave now…' : `Next Arweave probe in ${fmtCountdown(probeIn)}`);
-  const syncPart = (syncing || inflightIrys>0) ? 'Syncing…' : `Next Irys sync in ${fmtCountdown(syncIn)}`;
+  const probePart = inflightAr>0 ? 'Probing Arweave now...' : (probeIn<=0 ? 'Probing Arweave now...' : `Next Arweave probe in ${fmtCountdown(probeIn)}`);
+  const syncStatus = window.bookishSyncManager?.getSyncStatus?.();
+  const isSyncing = syncStatus?.isSyncing || inflightIrys > 0;
+  const syncPart = isSyncing ? 'Syncing...' : `Next Irys sync in ${fmtCountdown(syncIn)}`;
   const line = `${syncPart}; ${probePart}`;
   // Do not flip to active; keep idle mode and recompute every tick
   diagItems=[line]; diagRender();
@@ -312,20 +379,82 @@ function diagIdleSeed(){
 async function ensureKeys(){
   if(keyState.loaded) return true;
   let symTxt=localStorage.getItem('bookish.sym');
-  if(!symTxt){ const sym=prompt('Paste symmetric key hex (64 chars)'); if(!sym){ setStatus('Sym key missing'); return false; } if(!/^[0-9a-fA-F]{64}$/.test(sym.trim())){ alert('Bad symmetric key format'); return false; } localStorage.setItem('bookish.sym',sym.trim()); symTxt=sym.trim(); }
-  try { const sym=localStorage.getItem('bookish.sym'); if(window.createBrowserClient){ browserClient=await window.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } else if(window.bookishBrowserClient){ browserClient=await window.bookishBrowserClient.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } if(!browserClient){ setStatus('Client loading…'); return false; } keyState.loaded=true; const addr=await browserClient.address(); setStatus('EVM '+(addr?addr.slice(0,8)+'…':'ready')); return true; } catch(e){ console.error(e); setStatus('Key load error'); return false; }
+  // Legacy hex key prompt removed - now using passkey-protected seed storage
+  if(!symTxt){ setStatus('Not logged in'); return false; }
+  try { const sym=localStorage.getItem('bookish.sym'); if(window.createBrowserClient){ browserClient=await window.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } else if(window.bookishBrowserClient){ browserClient=await window.bookishBrowserClient.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } if(!browserClient){ setStatus('Client loading...'); return false; } keyState.loaded=true; const addr=await browserClient.address(); setStatus('EVM '+(addr?addr.slice(0,8)+'...':'ready')); return true; } catch(e){ console.error(e); setStatus('Key load error'); return false; }
 }
 
 // --- Arweave queries ---
-async function serverlessFetchEntries(){ if(!browserClient) return { entries:[], tombstones:[] }; const owner=null; let allEdges=[]; let cursor=undefined; let safety=0; const PAGE=50; for(;;){ const { edges, pageInfo } = await browserClient.searchByOwner(owner,{limit:PAGE,cursor}); allEdges.push(...edges); if(!pageInfo.hasNextPage) break; cursor=edges[edges.length-1]?.cursor; if(++safety>40) break; } const { liveEdges, tombstones } = browserClient.computeLiveSets(allEdges); const hydrated=[]; for(const e of liveEdges){ try{ const dec=await browserClient.decryptTx(e.node.id); hydrated.push({ txid:e.node.id, ...dec, block:e.node.block }); }catch{} } hydrated.sort((a,b)=>{ const da=a.dateRead||'0000-00-00'; const db=b.dateRead||'0000-00-00'; if(da!==db) return db.localeCompare(da); const ha=(a.block&&a.block.height)||0; const hb=(b.block&&b.block.height)||0; return hb-ha; }); return { entries:hydrated, tombstones }; }
+async function serverlessFetchEntries(){
+  if(!browserClient) return { entries:[], tombstones:[] };
+
+  // Step 1: Query GraphQL for all transactions
+  const owner=null; let allEdges=[]; let cursor=undefined; let safety=0; const PAGE=50;
+  console.log('[Bookish] Querying Arweave GraphQL for book entries...');
+  const queryStart = Date.now();
+  for(;;){
+    const { edges, pageInfo } = await browserClient.searchByOwner(owner,{limit:PAGE,cursor});
+    allEdges.push(...edges);
+    if(!pageInfo.hasNextPage) break;
+    cursor=edges[edges.length-1]?.cursor;
+    if(++safety>40) break;
+  }
+  console.log('[Bookish] GraphQL query completed in', Date.now() - queryStart, 'ms, found', allEdges.length, 'transactions');
+
+  const { liveEdges, tombstones } = browserClient.computeLiveSets(allEdges);
+  console.log('[Bookish] After filtering:', liveEdges.length, 'live entries,', tombstones.length, 'tombstones');
+
+  // Step 2: Check which txids we already have cached with seenRemote flag
+  const cachedEntries = window.bookishCache ? await window.bookishCache.listAllRaw() : [];
+  const confirmedTxids = new Set(
+    cachedEntries
+      .filter(e => e.txid && e.seenRemote && e.status === 'confirmed')
+      .map(e => e.txid)
+  );
+  const needsDecrypt = liveEdges.filter(e => !confirmedTxids.has(e.node.id));
+  const alreadySynced = liveEdges.filter(e => confirmedTxids.has(e.node.id));
+
+  console.log('[Bookish] Cache check:', alreadySynced.length, 'already synced,', needsDecrypt.length, 'need decrypt');
+
+  // Step 3: Decrypt entries that aren't fully synced in cache
+  const hydrated = [];
+  const decryptStart = Date.now();
+  for(const e of needsDecrypt){
+    try{
+      const dec = await browserClient.decryptTx(e.node.id);
+      hydrated.push({ txid:e.node.id, ...dec, block:e.node.block });
+    }catch(err){
+      console.warn('[Bookish] Failed to decrypt', e.node.id, err);
+    }
+  }
+
+  // Step 4: For already-synced entries, use cached data with updated block info
+  for(const e of alreadySynced) {
+    const cached = cachedEntries.find(c => c.txid === e.node.id);
+    if (cached) {
+      hydrated.push({
+        ...cached,
+        block: e.node.block // Update block info if changed
+      });
+    }
+  }
+
+  console.log('[Bookish] Decrypted', needsDecrypt.length, 'entries in', Date.now() - decryptStart, 'ms');
+  hydrated.sort((a,b)=>{ const da=a.dateRead||'0000-00-00'; const db=b.dateRead||'0000-00-00'; if(da!==db) return db.localeCompare(da); const ha=(a.block&&a.block.height)||0; const hb=(b.block&&b.block.height)||0; return hb-ha; });
+  return { entries:hydrated, tombstones };
+}
 
 // --- Ops replay ---
 async function replayOps(){
   if(replaying) return; replaying=true;
   try{
+    // Skip replay if cache is disabled (IndexedDB unavailable)
+    if(!window.bookishCache) return;
+    const haveKeys = await ensureKeys();
+    if (!haveKeys) return;
     const ops=await window.bookishCache.listOps();
     if(!ops.length) return;
-  diagMaybeSet(['Replaying pending changes…']);
+  diagMaybeSet(['Replaying pending changes...']);
     for(const op of ops){
       if(op.type==='create'){
         const local=entries.find(e=>e.id===op.localId);
@@ -333,103 +462,153 @@ async function replayOps(){
         if(local.txid){ await window.bookishCache.removeOp(op.id); continue; }
         try {
           const res=await browserClient.uploadEntry(op.payload,{});
-          const oldId=local.id; local.txid=res.txid; local.id=res.txid; local.pending=false; local.status='confirmed';
+          const oldId=local.id; local.txid=res.txid; local.id=res.txid; local.pending=false; local.status='confirmed'; local.seenRemote=true;
           await window.bookishCache.replaceProvisional(oldId,local);
           await window.bookishCache.removeOp(op.id);
           setStatus('Republished '+(local.title||''));
           orderEntries(); render();
         } catch{
-          setStatus('Replay pending…');
-          diagMaybeSet(['Awaiting Irys credit…','Will retry automatically']);
+          setStatus('Replay pending...');
+          diagMaybeSet(['Awaiting Irys credit...','Will retry automatically']);
           break;
         }
       }
     }
   } finally {
     replaying=false;
-  if(!syncing) diagMaybeClear();
+    diagMaybeClear();
   }
 }
 
-// --- Sync ---
-async function syncRemote(manual){ if(syncing) return; syncing=true; if(manual) setStatus('Refreshing…'); else if(!initialSynced) setStatus('Syncing…'); diagMaybeSet(['Syncing…']); try { await replayOps(); const have=await ensureKeys(); if(!have){ entries=await window.bookishCache.getAllActive(); orderEntries(); render(); setStatus('Read-only'); diagMaybeClear(); return; } const { entries:remoteEntries, tombstones } = await serverlessFetchEntries(); if(window.BOOKISH_DEBUG) console.debug('[Bookish] fetched remote entries:', remoteEntries.length, 'tombstones:', tombstones.length);
-  const remote=remoteEntries.map(e=>({ ...e, status:'confirmed', id:e.txid })); entries=await window.bookishCache.applyRemote(remote, tombstones); entries.forEach(e=> e._committed=true); orderEntries(); render(); initialSynced=true; setStatus('Synced'); if(typeof networkStatusMode!=='undefined' && networkStatusMode) setTimeout(updateNetDots, 50);
-  diagMaybeClear();
-} catch(err){ console.warn('[Bookish] sync error:', err); if(!initialSynced) setStatus('Offline (cached)'); else setStatus('Sync issue'); diagMaybeSet(['Sync issue – working offline','Will retry shortly']); } finally { syncing=false; const due=Date.now()+60000; window.bookishNextSyncAt=due; setTimeout(()=>syncRemote(),60000); } }
+// --- Sync (now managed by sync_manager.js) ---
+async function syncBooksFromArweave(){
+  // Fast fail if cache is unavailable (IndexedDB error)
+  if(!window.bookishCache){
+    console.warn('[Bookish] Book sync skipped - cache unavailable');
+    return;
+  }
+
+  await replayOps();
+  const have = await ensureKeys();
+
+  if (!have) {
+    // Only load cached books if user is logged in
+    if (storageManager.isLoggedIn()) {
+      entries = await window.bookishCache.getAllActive();
+      console.log('[Bookish] Loaded', entries.length, 'books from cache (no keys)');
+      orderEntries();
+      render();
+    }
+    return;
+  }
+
+  console.log('[Bookish] Starting book sync from Arweave...');
+  const { entries: remoteEntries, tombstones } = await serverlessFetchEntries();
+  console.log('[Bookish] Fetched', remoteEntries.length, 'remote entries,', tombstones.length, 'tombstones');
+  if (window.BOOKISH_DEBUG) console.debug('[Bookish] fetched remote entries:', remoteEntries.length, 'tombstones:', tombstones.length);
+
+  const remote = remoteEntries.map(e => ({ ...e, status: 'confirmed', id: e.txid }));
+  entries = await window.bookishCache.applyRemote(remote, tombstones);
+  entries.forEach(e => e._committed = true);
+  orderEntries();
+  render();
+
+  // Update dots after sync
+  setTimeout(updateBookDots, 50);
+}
 
 // --- Create / edit / delete ---
-async function createServerless(payload){ if(window.bookishCache){ const dup=await window.bookishCache.detectDuplicate(payload); if(dup){ setStatus('Duplicate (existing entry)'); const el=cardsEl.querySelector('[data-txid="'+(dup.txid||dup.id)+'"]'); if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('pulse'); setTimeout(()=>el.classList.remove('pulse'),1500);} return; } }
+async function createServerless(payload){ if(window.bookishCache){ const dup=await window.bookishCache.detectDuplicate(payload); if(dup){ uiStatusManager.refresh(); const el=cardsEl.querySelector('[data-txid="'+(dup.txid||dup.id)+'"]'); if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('pulse'); setTimeout(()=>el.classList.remove('pulse'),1500);} return; } }
   const localId='local-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-  const rec={id:localId, txid:null, ...payload, createdAt:Date.now(), status:'pending', pending:true, _committed:false};
-  entries.push(rec); if(window.bookishCache) window.bookishCache.putEntry(rec); orderEntries(); render();
+  const rec={id:localId, txid:null, ...payload, createdAt:Date.now(), status:'pending', pending:true, seenRemote:false, onArweave:false, _committed:false};
+  entries.push(rec);
+  if(window.bookishCache) await window.bookishCache.putEntry(rec);
+  orderEntries(); render();
+
+  // Phase 2: First-book celebration
+  if(entries.length === 1){
+    showCelebrationToast();
+  }
+
+  // Phase 2: Account nudge after 3rd book
+  if(entries.length === 3){
+    showAccountNudge();
+  }
   try {
+    // Ensure browser client is initialized
+    const haveKeys = await ensureKeys();
+    if (!haveKeys) {
+      throw new Error('Cannot upload: encryption keys not available');
+    }
+
     // Ensure hidden EVM wallet exists before upload
     if(window.bookishWallet?.ensure){ const ensured = await window.bookishWallet.ensure(); if(window.BOOKISH_DEBUG) console.debug('[Bookish] wallet ensure:', ensured, await window.bookishWallet.getAddress()); }
     if(window.BOOKISH_DEBUG) console.debug('[Bookish] uploadEntry start');
-  diagMaybeSet(['Publishing via Irys…','If funding is needed, you’ll be prompted']);
+  diagMaybeSet(['Publishing via Irys...','If funding is needed, you\'ll be prompted']);
     const res=await browserClient.uploadEntry(payload,{});
     if(window.BOOKISH_DEBUG) console.debug('[Bookish] uploadEntry ok:', res);
-    const oldId=rec.id; rec.txid=res.txid; rec.id=res.txid; rec.pending=false; rec.status='confirmed';
+    const oldId=rec.id; rec.txid=res.txid; rec.id=res.txid; rec.pending=false; rec.status='confirmed'; rec.seenRemote=true; rec.onArweave=false;
     if(window.bookishCache) await window.bookishCache.replaceProvisional(oldId,rec);
-    orderEntries(); render(); setStatus((res&&res.irys)?'Published via Irys (pending)':'Published (pending)');
+    walletError=null; // Clear any previous errors
+    orderEntries(); render(); uiStatusManager.refresh();
   diagMaybeClear();
-    if(typeof networkStatusMode!=='undefined' && networkStatusMode) setTimeout(updateNetDots, 50);
+    setTimeout(updateBookDots, 50);
   } catch(e){
     console.warn('[Bookish] uploadEntry error:', e);
-    if(e && (e.code==='funding-required' || e.code==='irys-required')){
+    if(e && e.code==='irys-required'){
       // Queue op and nudge user to Account panel
       const pending = { type:'create', localId:rec.id, payload };
       if(window.bookishCache) await window.bookishCache.queueOp(pending);
       lastPendingOp = pending;
-  setStatus('Funding required: open Account to fund, then refresh and retry.');
-  diagMaybeSet(['Funding required (402)','Open Account to fund, then retry']);
+  walletError='Irys client missing. Refresh page and retry.'; uiStatusManager.refresh();
+  diagMaybeSet(['Irys client missing','Refresh page and retry']);
     } else if(e && e.code==='post-fund-timeout'){
       // We funded, but node hasn't credited yet. Keep the op queued and inform the user.
       const pending = { type:'create', localId:rec.id, payload };
       if(window.bookishCache) await window.bookishCache.queueOp(pending);
       lastPendingOp = pending;
-      setStatus('Funding sent. Credit pending on Irys (can take a few minutes). Try again shortly from Account.');
+      walletError='Funding sent. Credit pending on Irys (can take a few minutes). Try again shortly from Account.'; uiStatusManager.refresh();
   diagMaybeSet(['Funding sent – awaiting credit','Retry from Account shortly']);
     } else if(e && (e.code==='base-insufficient-funds' || e.code==='base-insufficient-funds-recent')){
       // Wallet lacks L1 ETH to fund bundler; queue op and prompt manual top-up
       const pending = { type:'create', localId:rec.id, payload };
       if(window.bookishCache) await window.bookishCache.queueOp(pending);
       lastPendingOp = pending;
-      setStatus('Your Base wallet is low on ETH. Add a small amount and retry from Account.');
+      walletError='Auto-fund blocked: Base wallet low on ETH. Add a small amount and retry from Account.'; uiStatusManager.refresh();
   diagMaybeSet(['Base wallet low on ETH','Add a small amount, then retry']);
     } else {
-      setStatus('Queued (offline)');
+      uiStatusManager.refresh();
       await window.bookishCache.queueOp({ type:'create', localId:rec.id, payload });
   diagMaybeSet(['Offline – queued for publish']);
     }
   }
 }
-async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.txid===priorTxid); if(!old) throw new Error('Entry not found'); const snapshot={...old}; Object.assign(old,payload); old.pending=true; old.status='pending'; old._committed=false; await window.bookishCache.putEntry(old); orderEntries(); render(); try { payload.bookId=old.bookId; diagMaybeSet(['Saving via Irys…']); const res=await browserClient.uploadEntry({ ...payload },{ extraTags:[{name:'Prev',value:priorTxid}] }); const oldTxid=priorTxid; old.txid=res.txid; old.id=res.txid; old.pending=false; old.status='confirmed'; await window.bookishCache.replaceProvisional(oldTxid,old); orderEntries(); render(); setStatus((res&&res.irys)?'Saved via Irys (pending)':'Saved (pending)'); diagMaybeClear(); } catch(e){ if(e && (e.code==='funding-required' || e.code==='irys-required')){ // revert UI and prompt funding
+async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.txid===priorTxid); if(!old) throw new Error('Entry not found'); const snapshot={...old}; Object.assign(old,payload); old.pending=true; old.status='pending'; old.seenRemote=false; old._committed=false; await window.bookishCache.putEntry(old); orderEntries(); render(); try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot upload: encryption keys not available'); payload.bookId=old.bookId; diagMaybeSet(['Saving via Irys\u2026']); const res=await browserClient.uploadEntry({ ...payload },{ extraTags:[{name:'Prev',value:priorTxid}] }); const oldTxid=priorTxid; old.txid=res.txid; old.id=res.txid; old.pending=false; old.status='confirmed'; old.seenRemote=true; await window.bookishCache.replaceProvisional(oldTxid,old); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); diagMaybeClear(); } catch(e){ if(e && e.code==='irys-required'){ // revert UI and prompt refresh
     Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
     const pending = { type:'edit', priorTxid, payload };
     lastPendingOp = pending;
-    setStatus('Funding required: open Account to fund, then retry.');
-  diagMaybeSet(['Funding required (402)','Open Account to fund, then retry']);
+    walletError='Irys client missing. Refresh page and retry.'; uiStatusManager.refresh();
+  diagMaybeSet(['Irys client missing','Refresh page and retry']);
   } else if(e && e.code==='post-fund-timeout'){
     Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
     const pending = { type:'edit', priorTxid, payload };
     lastPendingOp = pending;
-    setStatus('Funding sent. Credit pending on Irys (few minutes). Retry from Account shortly.');
+    walletError='Funding sent. Credit pending on Irys (few minutes). Retry from Account shortly.'; uiStatusManager.refresh();
   diagMaybeSet(['Funding sent – awaiting credit','Retry from Account shortly']);
   } else if(e && (e.code==='base-insufficient-funds' || e.code==='base-insufficient-funds-recent')){
     Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
     const pending = { type:'edit', priorTxid, payload };
     lastPendingOp = pending;
-    setStatus('Your Base wallet is low on ETH. Top up and retry from Account.');
+    walletError='Auto-fund blocked: Base wallet low on ETH. Top up and retry from Account.'; uiStatusManager.refresh();
   diagMaybeSet(['Base wallet low on ETH','Add a small amount, then retry']);
-  } else { Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render(); setStatus('Save failed'); diagMaybeSet(['Save failed']); } } }
-async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid); if(!entry) return; markDeletingVisual(entry); setStatus('Deleting…'); try { await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); orderEntries(); render(); setStatus('Deleted (pending)'); } catch{ entry._deleting=false; render(); setStatus('Delete failed'); } }
+  } else { Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render(); walletError='Save failed'; uiStatusManager.refresh(); diagMaybeSet(['Save failed']); } } }
+async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid); if(!entry) return; markDeletingVisual(entry); uiStatusManager.refresh(); try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot delete: encryption keys not available'); await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); } catch{ entry._deleting=false; render(); walletError='Delete failed'; uiStatusManager.refresh(); } }
 
 // --- Form handlers ---
-form.addEventListener('submit',ev=>{ ev.preventDefault(); const priorTxid=form.priorTxid.value||undefined; const payload={ title:form.title.value.trim(), author:form.author.value.trim(), edition:form.edition.value.trim(), format:form.format.value, dateRead:form.dateRead.value }; if(coverPreview.dataset.b64){ payload.coverImage=coverPreview.dataset.b64; if(coverPreview.dataset.mime) payload.mimeType=coverPreview.dataset.mime; } setStatus(priorTxid?'Saving edit…':'Publishing…'); if(priorTxid){ // immediate close, background edit
+form.addEventListener('submit',ev=>{ ev.preventDefault(); const priorTxid=form.priorTxid.value||undefined; const payload={ title:form.title.value.trim(), author:form.author.value.trim(), edition:form.edition.value.trim(), format:form.format.value, dateRead:form.dateRead.value }; if(coverPreview.dataset.b64){ payload.coverImage=coverPreview.dataset.b64; if(coverPreview.dataset.mime) payload.mimeType=coverPreview.dataset.mime; } uiStatusManager.refresh(); if(priorTxid){ // immediate close, background edit
   closeModal();
-  editServerless(priorTxid,payload).catch(()=> setStatus('Save failed'));
-} else { closeModal(); createServerless(payload).catch(()=> setStatus('Save failed')); }
+  editServerless(priorTxid,payload).catch(()=> { walletError='Save failed'; uiStatusManager.refresh(); });
+} else { closeModal(); createServerless(payload).catch(()=> { walletError='Save failed'; uiStatusManager.refresh(); }); }
 });
 
 deleteBtn?.addEventListener('click', async ()=>{ const txid=form.priorTxid.value; if(!txid) return; closeModal(); await deleteServerless(txid); });
@@ -438,18 +617,139 @@ deleteBtn?.addEventListener('click', async ()=>{ const txid=form.priorTxid.value
 
 newBtn?.addEventListener('click', ()=>openModal(null));
 
+// Phase 2: First-run experience event handlers
+emptyAddBookBtn?.addEventListener('click', ()=>openModal(null));
+
+nudgeDismissBtn?.addEventListener('click', ()=>{
+  hideAccountNudge();
+  localStorage.setItem('bookish.accountNudgeDismissed', 'true');
+});
+
+nudgeCreateAccountBtn?.addEventListener('click', ()=>{
+  openAccount();
+});
+
 // --- Cache layer ---
-async function initCacheLayer(){ if(window.bookishCache){ await window.bookishCache.initCache(); entries=await window.bookishCache.getAllActive(); entries.forEach(e=>{ e._committed=!!(e.status==='confirmed'&&e.seenRemote); }); orderEntries(); render(); setStatus('Cached'); syncRemote(); } }
+async function initCacheLayer(){
+  if(!window.bookishCache) return;
+  try {
+    await window.bookishCache.initCache();
+
+    // Always load cached books immediately for instant display
+    entries=await window.bookishCache.getAllActive();
+    entries.forEach(e=>{ e._committed=!!(e.status==='confirmed'&&e.seenRemote); });
+    console.log('[Bookish] Loaded', entries.length, 'books from cache');
+    orderEntries();
+    render();
+    uiStatusManager.refresh();
+
+    // Initialize sync manager
+    initSyncManager({
+      onStatusChange: () => uiStatusManager.refresh(),
+      onBookSync: syncBooksFromArweave,
+      onAccountPersistence: async (isAutoTrigger) => {
+        if (window.accountUI?.handlePersistAccountToArweave) {
+          await window.accountUI.handlePersistAccountToArweave(isAutoTrigger);
+        }
+      },
+      getWalletInfo: async () => {
+        try {
+          const address = await window.bookishWallet?.getAddress();
+          if (!address) return null;
+          return { address };
+        } catch {
+          return null;
+        }
+      },
+      updateBalance: (balanceETH) => {
+        // Delegate to account_ui if available
+        if (window.accountUI?.updateBalanceDisplay) {
+          window.accountUI.updateBalanceDisplay(balanceETH);
+        }
+      }
+    });
+
+    // Only start sync loop if user is logged in
+    if (storageManager.isLoggedIn()) {
+      console.log('[Bookish] User logged in, starting sync loop');
+      startSync();
+    } else {
+      console.log('[Bookish] User not logged in, sync loop will not start');
+    }
+  } catch(err) {
+    console.error('[Bookish] IndexedDB failed to initialize:', err);
+    // Fail fast with clear error message
+    walletError='Storage Error: IndexedDB unavailable'; uiStatusManager.refresh();
+    diagMaybeSet([
+      'IndexedDB Error - Cannot start app',
+      'Try: Clear browser data, use private mode, or different browser',
+      'Error: ' + (err.message || 'Internal error opening backing store')
+    ]);
+    // Show error in UI
+    if(emptyEl) {
+      emptyEl.style.display='block';
+      emptyEl.innerHTML = `
+        <div style="max-width:600px;margin:40px auto;padding:32px;background:#1e293b;border:2px solid #dc2626;border-radius:12px;text-align:left;">
+          <h2 style="color:#dc2626;margin:0 0 16px 0;font-size:1.5rem;">⚠️ Storage Error</h2>
+          <p style="font-size:1rem;line-height:1.6;margin-bottom:16px;">
+            <strong>IndexedDB is unavailable.</strong> Bookish requires local storage to function.
+          </p>
+          <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin-bottom:24px;">
+            <strong>Error:</strong> ${err.message || 'Internal error opening backing store for indexedDB.open'}
+          </p>
+          <div style="background:#0f172a;padding:16px;border-radius:6px;border-left:3px solid #3b82f6;margin-bottom:20px;">
+            <p style="font-size:.875rem;font-weight:600;margin:0 0 12px 0;">💡 Try these solutions:</p>
+            <ol style="font-size:.875rem;line-height:1.8;margin:0;padding-left:20px;opacity:.9;">
+              <li><strong>Restart your browser</strong> - browser updates can corrupt IndexedDB until restart</li>
+              <li><strong>Clear site data:</strong> DevTools (F12) → Application → Clear Storage → "Clear site data"</li>
+              <li><strong>Try private/incognito mode</strong> to rule out browser profile corruption</li>
+              <li><strong>Check disk space</strong> - IndexedDB needs available storage</li>
+              <li><strong>Try a different browser</strong> (Chrome, Edge, Firefox)</li>
+              <li><strong>Disable browser extensions</strong> that might block storage</li>
+            </ol>
+          </div>
+          <button onclick="location.reload()" class="btn" style="width:100%;padding:12px;font-size:1rem;">
+            🔄 Retry (Reload Page)
+          </button>
+        </div>
+      `;
+    }
+    // Do NOT continue - stop app initialization
+    return;
+  }
+}
 
 // --- Status & sync bootstrap ---
-async function loadStatus(){ const have=await ensureKeys(); if(!have){ setStatus('Serverless (read-only)'); return; } try { const owner=await browserClient.address(); setStatus('Owner '+owner.slice(0,8)+'…'); } catch{ setStatus('Key error'); } }
+async function loadStatus(){ const have=await ensureKeys(); if(!have){ uiStatusManager.refresh(); return; } try { const owner=await browserClient.address(); uiStatusManager.refresh(); } catch{ walletError='Key error'; uiStatusManager.refresh(); } }
 
 // --- Init ---
 window.bookishNextSyncAt = Date.now() + 60000;
-loadStatus(); initCacheLayer(); setTimeout(()=>syncRemote(),300);
+
+// Ensure modal is closed on page load
+if(modal) {
+  modal.classList.remove('active');
+}
+// Ensure search UI is hidden on page load
+if(window.bookSearch) {
+  window.bookSearch.handleModalOpen(true);
+}
+
+// Initialize UI status manager
+uiStatusManager.init({
+  getAccountStatus,
+  getSyncStatus: getSyncStatusForUI,
+  getBalanceStatus
+});
+
+loadStatus(); initCacheLayer(); // sync started in initCacheLayer
 // Initialize hidden EVM wallet (ensures presence once sym key exists) and show address hint
-(async function initWallet(){ try { const ok = await (window.bookishWallet?.ensure?.()); const addr = await (window.bookishWallet?.getAddress?.()); if(addr){ setStatus((statusEl.textContent?statusEl.textContent+' • ':'')+'EVM '+addr.slice(0,6)+'…'); } } catch{} })();
-window.addEventListener('online',()=>{ setStatus('Online – syncing'); replayOps().then(()=>syncRemote(true)); });
+(async function initWallet(){ try { const ok = await (window.bookishWallet?.ensure?.()); const addr = await (window.bookishWallet?.getAddress?.()); if(addr){ setStatus((statusEl.textContent?statusEl.textContent+' • ':'')+'EVM '+addr.slice(0,6)+'...'); } } catch{} })();
+// Initialize PRF-based account UI
+(async function initAccount(){ try { const { initAccountUI } = await import('./account_ui.js'); await initAccountUI(); } catch(e){ console.error('Failed to init account UI:', e); } })();
+window.addEventListener('online',()=>{ uiStatusManager.refresh(); replayOps(); });
+
+// Expose sync manager methods for account UI
+window.bookishSyncManager = { getSyncStatus: getSyncStatusForUI, triggerPersistenceCheck };
 
 // --- Geek panel wiring ---
 function updateGeekPanel(){
@@ -462,10 +762,7 @@ if(geekBtn && geekPanel && geekClose){
     const open = (geekPanel.style.display==='none' || !geekPanel.style.display);
     geekPanel.style.display = open?'block':'none';
     updateGeekPanel();
-    // Toggle network status mode with panel
-    if(typeof networkStatusMode!=='undefined') networkStatusMode = open;
-    if(window.BOOKISH_DEBUG) console.debug('[Bookish] network status mode:', networkStatusMode);
-    setTimeout(()=>{ if(typeof updateNetDots==='function') updateNetDots(); }, 10);
+    setTimeout(()=>{ if(typeof updateBookDots==='function') updateBookDots(); }, 10);
     if(!open){
       diagClear(); if(diagTickTimer) { clearInterval(diagTickTimer); diagTickTimer=null; }
     } else {
@@ -474,8 +771,8 @@ if(geekBtn && geekPanel && geekClose){
       diagTickTimer=setInterval(()=>{ if(diagIdle) diagIdleSeed(); else diagRender(); }, 1000);
     }
   });
-  geekClose.addEventListener('click',()=>{ geekPanel.style.display='none'; if(typeof networkStatusMode!=='undefined') networkStatusMode=false; diagClear(); if(diagTickTimer){ clearInterval(diagTickTimer); diagTickTimer=null; } setTimeout(()=>{ if(typeof updateNetDots==='function') updateNetDots(); }, 10); });
-  setInterval(()=>{ updateGeekPanel(); if(typeof networkStatusMode!=='undefined' && networkStatusMode) updateNetDots(); }, 5000);
+  geekClose.addEventListener('click',()=>{ geekPanel.style.display='none'; diagClear(); if(diagTickTimer){ clearInterval(diagTickTimer); diagTickTimer=null; } setTimeout(()=>{ if(typeof updateBookDots==='function') updateBookDots(); }, 10); });
+  // Removed 5s interval - now handled by 30s sync loop
 }
 
 // --- Pinch / wheel zoom (restore) ---

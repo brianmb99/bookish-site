@@ -1,5 +1,5 @@
-// sw.js - basic PWA service worker (v7 serverless)
-const VERSION='v7';
+// sw.js - basic PWA service worker (v8 serverless)
+const VERSION='v8';
 const CACHE_NAME='bookish-precache-'+VERSION;
 const CORE_ASSETS=[
   '/',
@@ -20,7 +20,12 @@ self.addEventListener('install',e=>{
   e.waitUntil((async()=>{ const c=await caches.open(CACHE_NAME); try{ await c.addAll(CORE_ASSETS); }catch(_){} self.skipWaiting(); })());
 });
 self.addEventListener('activate',e=>{
-  e.waitUntil((async()=>{ const keys=await caches.keys(); await Promise.all(keys.filter(k=>k!==CACHE_NAME).map(k=>caches.delete(k))); await self.clients.claim(); })());
+  e.waitUntil((async()=>{
+    console.log('[SW] Activating version:',VERSION);
+    const keys=await caches.keys();
+    await Promise.all(keys.filter(k=>k!==CACHE_NAME).map(k=>caches.delete(k)));
+    await self.clients.claim();
+  })());
 });
 self.addEventListener('message',e=>{ if(e.data==='SKIP_WAITING'){ self.skipWaiting(); } });
 async function cachePut(req,res){ try{ const c=await caches.open(CACHE_NAME); await c.put(req,res); }catch(_){} }

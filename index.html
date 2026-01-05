@@ -6,6 +6,9 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
 <link rel="apple-touch-icon" href="assets/icons/icon-192.png"/>
 <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-192.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/styles.css"/>
 </head><body><div id="app">
 <header>
@@ -30,26 +33,38 @@
 <div style="display:flex;gap:8px;margin:4px 0 12px">
   <button id="newBtn" class="new-compact" title="Add new">＋ New</button>
 </div>
+<div id="accountNudgeBanner" class="nudge-banner" style="display:none;">
+  <div class="nudge-content">
+    <span class="nudge-icon">💡</span>
+    <div class="nudge-text">
+      <div class="nudge-headline">Want to access your books from other devices?</div>
+      <button id="nudgeCreateAccountBtn" class="btn-link nudge-cta">Create Free Account →</button>
+    </div>
+  </div>
+  <button id="nudgeDismissBtn" class="nudge-dismiss" title="Dismiss">×</button>
+</div>
 
 <div id="accountPanel" class="layer-above" style="display:none;margin:10px 0;padding:12px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:.85rem">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <strong>Account</strong>
+  <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
     <button id="accountClose" class="refresh-link" style="font-size:.7rem">close</button>
   </div>
-  <div style="margin-top:6px;display:grid;gap:6px">
-    <div><span style="opacity:.7">Wallet</span>: <span id="acctAddr">—</span> <button id="acctCopy" class="btn secondary" style="padding:3px 8px;font-size:.7rem">Copy</button></div>
-    <div><span style="opacity:.7">Base balance</span>: <span id="acctL1">—</span></div>
-    <div><span style="opacity:.7">Estimated cost (next publish)</span>: <span id="acctCost">—</span></div>
-    <div><span style="opacity:.7">Irys node</span>: <span id="acctNodeUrlDisplay">—</span></div>
-    <div><span style="opacity:.7">Funding address</span>: <span id="acctFundAddrResolved">—</span></div>
+  <div style="display:grid;gap:6px">
+    <!-- Account section dynamically inserted here by account_ui.js -->
   </div>
-  <div id="acctMsg" style="font-size:.75rem;margin-top:6px;opacity:.85"></div>
-
 </div>
 
 <div id="cards" class="cards"></div>
-<div class="empty" id="empty" style="display:none">No entries yet.</div>
-<footer>Bookish • Local demo</footer>
+<div id="empty" class="empty-state" style="display:none">
+  <div class="empty-illustration">📚</div>
+  <h2 class="empty-headline">Your reading journey starts here</h2>
+  <p class="empty-subtext">Track what you read. Keep it forever. Access it anywhere.</p>
+  <button id="emptyAddBookBtn" class="btn primary empty-cta">Add Your First Book</button>
+</div>
+<div id="celebrationToast" class="toast celebration-toast" style="display:none;">
+  <span class="toast-icon">🎉</span>
+  <span class="toast-message">First book added! You're on your way.</span>
+</div>
+<footer>Bookish • Local demo • v0.1.6-uat1</footer>
 </div>
 
 <div id="modal" class="modal">
@@ -79,7 +94,7 @@
         <button type="button" id="nextEdition">▶</button>
       </div>
     </div>
-    <form id="entryForm" class="inline">
+    <form id="entryForm" class="inline" novalidate>
       <div class="form-as-tile">
         <div class="tile-cover" id="tileCoverClick">
           <img class="preview" id="coverPreview" style="display:none"/>
@@ -89,9 +104,9 @@
         <div class="fields-cluster">
           <div class="field-block"><label>Title</label><input name="title" required placeholder="Title"></div>
           <div class="field-block"><label>Author</label><input name="author" required placeholder="Author"></div>
-            <div class="field-block"><label>Edition</label><input name="edition" required placeholder="Edition / Year"></div>
+            <div class="field-block"><label>Edition</label><input name="edition" placeholder="Edition / Year"></div>
           <div class="field-block"><label>Format</label><select name="format"><option>paperback</option><option>hardcover</option><option>ebook</option><option>audiobook</option><option>other</option></select></div>
-          <div class="field-block"><label>Date Read</label><div class="date-input-wrap"><input name="dateRead" type="date" required><button type="button" class="cal-btn" id="openCalendarBtn" title="Pick date">📅</button></div></div>
+          <div class="field-block"><label>Date Read</label><div class="date-input-wrap"><input name="dateRead" type="date"><button type="button" class="cal-btn" id="openCalendarBtn" title="Pick date">📅</button></div></div>
         </div>
       </div>
       <input type="hidden" name="priorTxid"/>
@@ -105,8 +120,23 @@
 </div>
 <script>
  if('serviceWorker' in navigator){
-  window.addEventListener('load',()=>{
-  navigator.serviceWorker.register('./sw.js').catch(()=>{});
+  window.addEventListener('load',async()=>{
+    try{
+      const registration=await navigator.serviceWorker.register('./sw.js');
+      // Check for updates on page load
+      registration.update();
+      // Check for updates periodically (every 60 minutes)
+      setInterval(()=>registration.update(),60*60*1000);
+    }catch(err){
+      console.warn('SW registration failed:',err);
+    }
+  });
+  // Reload when new service worker takes control
+  let refreshing=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(refreshing) return;
+    refreshing=true;
+    window.location.reload();
   });
  }
  // Minimal install prompt handling
@@ -120,8 +150,9 @@
 <script type="module" src="js/browser_client.js"></script>
 <script type="module" src="js/wallet.js"></script>
 <script type="module" src="js/irys_client_browser.js"></script>
-<script src="js/cache.js"></script>
-<script src="js/app.js"></script>
-<script src="js/date_picker.js"></script>
-<script src="js/book_search.js"></script>
+<script type="module" src="js/cache.js"></script>
+<script type="module" src="js/sync_manager.js"></script>
+<script type="module" src="js/app.js"></script>
+<script defer src="js/date_picker.js"></script>
+<script type="module" src="js/book_search.js"></script>
 </body></html>

@@ -6,4 +6,4 @@ Source code, tests, tools, and private utilities live in a separate private repo
 
 Do not edit files here directly; changes will be overwritten on next publish.
 
-Last publish: 2025-10-03 23:01:17 -04:00
+Last publish: 2026-01-05 13:16:27 -05:00

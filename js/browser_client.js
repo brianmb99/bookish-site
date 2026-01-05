@@ -2,6 +2,8 @@
 // Uses WebCrypto for AES-256-GCM; no Arweave JWK required.
 // Layout of encrypted payload: iv(12) | tag(16) | ciphertext (matches Node implementation)
 
+import { hexToBytes, base64ToBytes, bytesToBase64, importAesKey, encryptJsonToBytes, decryptBytesToJson } from './core/crypto_core.js';
+
 export async function deriveBookId({ isbn, title, author, edition }) {
   if (isbn && isbn.trim()) return `isbn:${isbn.trim()}`;
   const s = `${title ?? ''}|${author ?? ''}|${edition ?? ''}`.toLowerCase();
@@ -14,31 +16,19 @@ export async function deriveBookId({ isbn, title, author, edition }) {
 export async function createBrowserClient({ jwk=null, symKeyHex, appName='bookish', schemaVersion='0.1.0', keyId='default', useIrysProxy=false }){
   if(!symKeyHex) throw new Error('missing symKeyHex');
   const symKey = hexToBytes(symKeyHex.trim());
-  const aesKey = await crypto.subtle.importKey('raw', symKey, { name:'AES-GCM' }, false, ['encrypt','decrypt']);
+  const aesKey = await importAesKey(symKey);
   // Identity: use EVM address derived from bookish.sym
   async function address(){ try{ return await (window.bookishWallet?.getAddress?.()); }catch{ return null; } }
 
   function encJson(obj){
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const pt = new TextEncoder().encode(JSON.stringify(obj));
-    return crypto.subtle.encrypt({ name:'AES-GCM', iv }, aesKey, pt).then(buf=>{
-      const full = new Uint8Array(buf); // ciphertext||tag
-      const tag = full.slice(full.length-16);
-      const ct = full.slice(0, full.length-16);
-      const out = new Uint8Array(12+16+ct.length);
-      out.set(iv,0); out.set(tag,12); out.set(ct,28);
-      return out;
-    });
+    return encryptJsonToBytes(aesKey, obj);
   }
   async function decBytes(bytes){
-    const iv = bytes.slice(0,12);
-    const tag = bytes.slice(12,28);
-    const ct  = bytes.slice(28);
-    const joined = new Uint8Array(ct.length + tag.length);
-    joined.set(ct,0); joined.set(tag, ct.length); // reconstruct ciphertext||tag for WebCrypto
-    const ptBuf = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, aesKey, joined).catch(()=>null);
-    if(!ptBuf) throw new Error('decrypt failed');
-    return JSON.parse(new TextDecoder().decode(ptBuf));
+    try {
+      return await decryptBytesToJson(aesKey, bytes);
+    } catch(e) {
+      throw new Error('decrypt failed');
+    }
   }
 
   function addCommonTags(tx){
@@ -197,11 +187,6 @@ export async function createBrowserClient({ jwk=null, symKeyHex, appName='bookis
 
   return { address, uploadEntry, decryptTx, searchByOwner, computeLiveSets, tombstone, estimateEntryBytes };
 }
-
-// --- helpers ---
-function hexToBytes(hex){ if(hex.length%2) throw new Error('bad hex'); const out=new Uint8Array(hex.length/2); for(let i=0;i<out.length;i++) out[i]=parseInt(hex.substr(i*2,2),16); return out; }
-function base64ToBytes(b64){ return Uint8Array.from(atob(b64),c=>c.charCodeAt(0)); }
-function bytesToBase64(bytes){ let binary=''; for(let i=0;i<bytes.length;i++) binary+=String.fromCharCode(bytes[i]); return btoa(binary); }
 
 // Convenience global for ad-hoc debugging
 window.bookishBrowserClient = { createBrowserClient, deriveBookId };

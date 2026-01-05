@@ -1,4 +1,6 @@
 // cache.js - IndexedDB based local cache & sync layer
+import { computeContentHash as coreComputeContentHash, detectDuplicate as coreDetectDuplicate, applyRemote as coreApplyRemote, compactDuplicates as coreCompactDuplicates } from './core/cache_core.js';
+
 (function(){
   const DB_NAME='bookish';
   const DB_VERSION=1;
@@ -35,8 +37,7 @@
     });
   }
 
-  async function sha256Hex(str){ const enc=new TextEncoder().encode(str); const buf=await crypto.subtle.digest('SHA-256',enc); return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''); }
-  async function computeContentHash(entry){ const base=(entry.title||'')+'|'+(entry.author||'')+'|'+(entry.edition||'')+'|'+(entry.format||'')+'|'+(entry.dateRead||''); return 'sha256-'+await sha256Hex(base); }
+  async function computeContentHash(entry){ return coreComputeContentHash(entry); }
   async function ensureContentHash(e){ if(!e.contentHash || !e.contentHash.startsWith('sha256-')){ e.contentHash=await computeContentHash(e); } return e; }
   async function putEntry(e){ await ensureContentHash(e); return withStore('readwrite', ENTRY_STORE, store=> store.put(e)); }
   async function bulkPut(entries){ return withStore('readwrite', ENTRY_STORE, store=>{ entries.forEach(async e=>{ await ensureContentHash(e); store.put(e); }); }); }
@@ -59,53 +60,28 @@
   }
 
   async function applyRemote(remoteList, tombstones){
-    // tombstones: array of {txid, ref}
-    const tombRefs = new Set((tombstones||[]).map(t=>t.ref).filter(Boolean));
-    const localAll=await listAllRaw();
-    const localMapByTx=new Map(localAll.filter(e=>e.txid).map(e=>[e.txid,e]));
-    const remoteTxids=new Set(remoteList.map(r=>r.txid));
-    const toAdd=[];
-    for(const r of remoteList){
-      if(tombRefs.has(r.txid)) continue; // shouldn't happen (server filters), defensive
-      const existing=localMapByTx.get(r.txid);
-      if(existing){
-        let changed=false;
-        if(existing.pending){ existing.pending=false; existing.status='confirmed'; changed=true; }
-        if(!existing.seenRemote){ existing.seenRemote=true; changed=true; }
-        if(changed) await putEntry(existing);
-      } else {
-        toAdd.push(await ensureContentHash({id:r.txid, txid:r.txid, title:r.title, author:r.author, edition:r.edition, format:r.format, dateRead:r.dateRead, coverImage:r.coverImage, mimeType:r.mimeType, createdAt:Date.now(), status:'confirmed', seenRemote:true}));
-      }
+    const localAll = await listAllRaw();
+    const result = await coreApplyRemote(remoteList, tombstones, localAll);
+
+    // Apply changes to IndexedDB
+    for(const entry of result.toUpdate){
+      await putEntry(entry);
     }
-    // Remove (or tombstone) only if explicit tombstone present
-    for(const e of localAll){
-      if(e.txid && tombRefs.has(e.txid) && e.status!=='tombstoned'){
-        e.status='tombstoned'; e.tombstonedAt=Date.now(); await putEntry(e);
-      }
+    for(const entry of result.toTombstone){
+      await putEntry(entry);
     }
-    if(toAdd.length) await bulkPut(toAdd);
+    if(result.toAdd.length) await bulkPut(result.toAdd);
+
     return getAllActive();
   }
-  async function detectDuplicate(payload){ const h=await computeContentHash(payload); const existing=await findByContentHash(h); return existing && existing.status!=='tombstoned' ? existing : null; }
+  async function detectDuplicate(payload){ const all=await listAllRaw(); return coreDetectDuplicate(payload, all); }
   async function deleteById(id){ if(!id) return; return withStore('readwrite', ENTRY_STORE, store=> store.delete(id)); }
   async function compactDuplicates(){
     const all=await listAllRaw();
-    const seenTx=new Map();
-    for(const e of all){
-      if(e.txid){
-        if(!seenTx.has(e.txid)){ seenTx.set(e.txid,e); }
-        else { // duplicate same txid: keep confirmed or latest
-          const prev=seenTx.get(e.txid);
-          const keep = (prev.status==='confirmed' && e.status!=='confirmed') ? prev : (e.status==='confirmed' && prev.status!=='confirmed') ? e : ( (e.createdAt||0) > (prev.createdAt||0) ? e : prev );
-          const drop = keep===e? prev : e;
-          if(drop.id!==keep.id) await deleteById(drop.id);
-          seenTx.set(e.txid,keep);
-        }
-      }
+    const result = coreCompactDuplicates(all);
+    for(const id of result.toDelete){
+      await deleteById(id);
     }
-    // remove pending duplicates by contentHash if a confirmed exists
-    const confirmedByHash=new Set(all.filter(e=>e.status==='confirmed').map(e=>e.contentHash));
-    for(const e of all){ if(e.status!=='confirmed' && confirmedByHash.has(e.contentHash)){ await deleteById(e.id); } }
   }
   async function replaceProvisional(oldId, rec){ if(oldId && oldId!==rec.id){ await deleteById(oldId); } await putEntry(rec); }
   async function listAllRaw(){
@@ -125,9 +101,16 @@
     return withStore('readonly', OPS_STORE, store=> new Promise(r=>{ const out=[]; const req=store.openCursor(); req.onsuccess=e=>{ const cur=e.target.result; if(cur){ out.push(cur.value); cur.continue(); } else { out.sort((a,b)=>a.createdAt-b.createdAt); r(out); } }; }));
   }
   async function removeOp(id){ if(!id) return; return withStore('readwrite', OPS_STORE, store=> store.delete(id)); }
+  async function clearAll(){
+    return withStore('readwrite', ENTRY_STORE, store=> new Promise(r=>{
+      const req=store.clear();
+      req.onsuccess=()=>r();
+      req.onerror=()=>r();
+    }));
+  }
 
   window.bookishCache={
     initCache,getAllActive,putEntry,bulkPut,applyRemote,findByTxid,markTombstoned,removeOldTombstones,listAllRaw,computeContentHash,detectDuplicate,deleteById,compactDuplicates,replaceProvisional,
-    queueOp,listOps,removeOp
+    queueOp,listOps,removeOp,clearAll
   };
 })();

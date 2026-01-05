@@ -3,6 +3,8 @@
 
 import { Wallet, JsonRpcProvider } from 'https://esm.sh/ethers@6';
 import { resolveToken, detectToken, getNodeInfo as httpGetNodeInfo, estimateCost as httpEstimateCost, getFundingAddress as httpGetFundingAddress, getNodeUrl as httpGetNodeUrl } from './irys_http.js';
+import { append as logAppend } from './core/log_local.js';
+import { decideFunding } from './core/funding_policy.js';
 
 function getIrysNode(){ return httpGetNodeUrl(); }
 // Token handling: prefer user override; otherwise detect from /info
@@ -27,10 +29,6 @@ function recordLastFund({ node, token, address, amountWei, txHash }){
   lsWriteJSON(LS_LAST_FUND_KEY, { node, token, address, amountWei: String(amountWei), txHash, at: now() });
 }
 function getLastFund(){ return lsReadJSON(LS_LAST_FUND_KEY); }
-function lastFundMatchesIdentity(lf, { node, token, address }){
-  return !!lf && lf.node===node && lf.token===token && lf.address?.toLowerCase?.()===address?.toLowerCase?.();
-}
-function lastFundCooldownRemaining(lf){ if(!lf) return 0; const rem = (lf.at||0) + FUND_COOLDOWN_MS - now(); return rem>0?rem:0; }
 function setFundBlock({ address, reason }){ lsWriteJSON(LS_FUND_BLOCK_KEY, { address, reason, until: now() + INSUFF_FUNDS_COOLDOWN_MS }); }
 function getFundBlock(){ const b = lsReadJSON(LS_FUND_BLOCK_KEY); if(!b) return null; if((b.until||0) < now()) return null; return b; }
 
@@ -190,6 +188,7 @@ async function upload(dataBytes, tags){
 
     async function retryCommit(maxMs){
       const start = now(); let attempt=0;
+      logAppend('funding', 'retry-start', { maxMs });
       console.info('[Bookish:Irys] retrying commit…', { maxMs, intervalMs: RETRY_INTERVAL_MS });
       for(;;){
         await new Promise(r=>setTimeout(r, RETRY_INTERVAL_MS));
@@ -200,6 +199,7 @@ async function upload(dataBytes, tags){
         if(resp.ok){
           const id = json?.id || json?.dataId || json?.txId || json?.transactionId;
           if(!id) throw new Error('missing-id');
+          logAppend('funding', 'retry-success', { attempt, id });
           return { id };
         }
         if(resp.status!==402){
@@ -208,6 +208,7 @@ async function upload(dataBytes, tags){
         }
         if(now() - start > maxMs){
           console.info('[Bookish:Irys] post-fund retry window exhausted – still 402', json||text);
+          logAppend('funding', 'retry-timeout', { maxMs, attempts: attempt, details: json||text });
           const e=new Error('post-fund-timeout'); e.code='post-fund-timeout'; e.details=json||text; throw e;
         }
       }
@@ -216,34 +217,17 @@ async function upload(dataBytes, tags){
     // First attempt
     let { resp, text, json } = await tryPost();
     if(resp.status===402){
+      logAppend('funding', '402-received', { status: resp.status });
       console.info('[Bookish:Irys] upload 402 – initiating single on-chain funding then retry window');
       // Use actual DataItem size for price estimation (includes headers/tags/signature)
       const chargeBytes = (raw && (raw.byteLength||raw.length)) ? (raw.byteLength||raw.length) : (bytes?.length||0);
-  // Estimate price and plan with buffer
+  // Estimate price
       const price = await estimateCost(chargeBytes).catch(()=>null);
       if(!price){ const e=new Error('price-failed'); e.code='price-failed'; throw e; }
-      const buffer = (price * BigInt(FUND_BUFFER_BPS)) / 10000n; // bps
-      const amount = price + buffer;
-  console.info('[Bookish:Irys] funding plan', { chargeBytes, priceWei: price.toString(), bufferWei: buffer.toString(), totalWei: amount.toString() });
 
-      // Identity for cooldown checks
-      const identity = { node: getIrysNode(), token: tk, address: await (await getSigner()).getAddress() };
-      const lf = getLastFund();
-      const fundBlock = getFundBlock();
-      if(fundBlock && fundBlock.address?.toLowerCase?.()===identity.address.toLowerCase?.()){
-        console.info('[Bookish:Irys] funding skipped (recent insufficient base funds block active)', fundBlock);
-        // Fast-fail to avoid thrash; let UI prompt user to top up
-        const e = new Error('base-insufficient-funds-recent'); e.code='base-insufficient-funds-recent'; e.details=fundBlock; throw e;
-      }
-
-      const cooldownMs = lastFundMatchesIdentity(lf, identity) ? lastFundCooldownRemaining(lf) : 0;
-      if(cooldownMs > 0){
-        console.info('[Bookish:Irys] funding skipped (recent on-chain funding exists)', { last: lf, cooldownMs });
-        return await retryCommit(Math.max(RETRY_WITH_RECENT_FUND_MS, cooldownMs + 60000));
-      }
-
-      // Pre-check: ensure wallet has enough for amount + gas reserve to avoid doomed tx
+      // Compute gas reserve for precheck
       const signerForFunds = await getSigner();
+      const identity = { node: getIrysNode(), token: tk, address: await signerForFunds.getAddress() };
       const walletBal = await signerForFunds.provider.getBalance(identity.address).catch(()=>null);
       let gasReserve = 0n;
       try{
@@ -252,32 +236,69 @@ async function upload(dataBytes, tags){
         const gasLimit = 21000n; // simple transfer
         gasReserve = (gasLimit * perGas * 12n) / 10n; // 1.2x cushion
       }catch{}
-      const totalNeeded = amount + gasReserve;
-      if(walletBal!=null && BigInt(walletBal) < totalNeeded){
-        console.info('[Bookish:Irys] base wallet insufficient for amount+gas', {
-          walletBalWei: walletBal.toString(), amountWei: amount.toString(), gasReserveWei: gasReserve.toString(), totalNeededWei: totalNeeded.toString()
-        });
-        setFundBlock({ address: identity.address, reason: 'insufficient-base-funds-precheck' });
-        const e = new Error('base-insufficient-funds'); e.code='base-insufficient-funds'; e.details={ walletBalWei: walletBal?.toString?.(), amountWei: amount.toString(), gasReserveWei: gasReserve.toString() }; throw e;
+
+      // Use funding policy to decide action
+      const lf = getLastFund();
+      const fundBlock = getFundBlock();
+      const decision = decideFunding({
+        priceWei: price.toString(),
+        lastFund: lf,
+        fundBlock,
+        identity,
+        walletBalWei: walletBal?.toString() ?? null,
+        gasReserveWei: gasReserve.toString(),
+        nowMs: Date.now()
+      });
+
+      console.info('[Bookish:Irys] funding decision', decision);
+
+      // Handle decision
+      if (decision.action === 'block') {
+        logAppend('funding', 'decision-block', decision);
+        if (decision.reason === 'fund-block-active') {
+          const e = new Error('base-insufficient-funds-recent');
+          e.code='base-insufficient-funds-recent';
+          e.details=decision.details;
+          throw e;
+        } else if (decision.reason === 'insufficient-balance') {
+          setFundBlock({ address: identity.address, reason: 'insufficient-base-funds-precheck' });
+          const e = new Error('base-insufficient-funds');
+          e.code='base-insufficient-funds';
+          e.details=decision.details;
+          throw e;
+        }
       }
+
+      if (decision.action === 'skip') {
+        logAppend('funding', 'decision-skip', decision);
+        return await retryCommit(decision.retryWindowMs);
+      }
+
+      // decision.action === 'fund': proceed with on-chain funding
+      const amount = BigInt(decision.amountWei);
+      logAppend('funding', 'decision-fund', { amountWei: amount.toString(), decision });
 
       // Attempt single on-chain funding
       try{
+        logAppend('funding', 'onchain-start', { amountWei: amount.toString(), identity });
         const res = await fundOnChain(amount.toString());
+        logAppend('funding', 'onchain-success', { txHash: res.txId, amountWei: amount.toString() });
         recordLastFund({ ...identity, amountWei: amount.toString(), txHash: res.txId });
       }catch(err){
         // If base wallet has insufficient funds, set temporary block and surface a clear error
         const errCode = err?.code || err?.info?.error?.code || err?.name;
         const msg = String(err?.message||'');
         if(errCode==='INSUFFICIENT_FUNDS' || /insufficient funds/i.test(msg)){
+          logAppend('funding', 'onchain-insuff', { errCode, msg });
           setFundBlock({ address: identity.address, reason: 'insufficient-base-funds' });
           const e = new Error('base-insufficient-funds'); e.code='base-insufficient-funds'; e.details=err; throw e;
         }
+        logAppend('funding', 'onchain-error', { errCode, msg });
         throw err;
       }
 
       // Retry after funding (give node time to credit)
-      return await retryCommit(RETRY_AFTER_FUND_MS);
+      return await retryCommit(decision.retryWindowMs);
     }
     if(!resp.ok){ console.info('[Bookish:Irys] upload error body', json||text); const e=new Error(`upload-http-${resp.status}`); e.details=json||text; throw e; }
     const id = json?.id || json?.dataId || json?.txId || json?.transactionId;

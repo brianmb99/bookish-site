@@ -1,6 +1,7 @@
 {
   "$id": "https://your.repo/bookish/schemas/reading-0.1.0.json",
   "title": "Bookish Reading v0.1.0",
+  "description": "Book reading entry stored on Arweave, keyed by wallet address",
   "type": "object",
   "required": ["schema", "version", "bookId", "title", "author", "edition", "format", "dateRead"],
   "properties": {
@@ -18,5 +19,6 @@
   "allOf": [
     { "if": { "required": ["coverImage"] }, "then": { "required": ["mimeType"] } }
   ],
-  "additionalProperties": false
+  "additionalProperties": true,
+  "$comment": "Arweave tags: App-Name=Bookish, Type=reading, Pub-Addr=<walletAddress>"
 }

@@ -1,0 +1,27 @@
+{
+  "$id": "https://your.repo/bookish/schemas/passkey-mapping-0.1.0.json",
+  "title": "Bookish Passkey-Seed Mapping v0.1.0",
+  "description": "Maps WebAuthn credentialId to encrypted seed phrase for cross-device sign-in",
+  "type": "object",
+  "required": ["schema", "version", "credentialId", "encryptedSeed"],
+  "properties": {
+    "schema": { "const": "passkey-mapping" },
+    "version": { "const": "0.1.0" },
+    "credentialId": {
+      "type": "string",
+      "description": "Base64url-encoded WebAuthn credential ID"
+    },
+    "encryptedSeed": {
+      "type": "object",
+      "required": ["iv", "ciphertext"],
+      "properties": {
+        "iv": { "type": "string", "description": "Base64-encoded initialization vector" },
+        "ciphertext": { "type": "string", "description": "Base64-encoded encrypted seed phrase (12 words)" }
+      },
+      "additionalProperties": true,
+      "description": "Seed encrypted with PRF-derived key from passkey"
+    }
+  },
+  "additionalProperties": true,
+  "$comment": "Arweave tags: App-Name=Bookish, Type=passkey-mapping, Credential-ID=<credentialId>, Enc=aes-256-gcm"
+}

@@ -2,46 +2,28 @@
 // Exposes window.bookishWallet with: ensure(), getAddress(), getBalance(), signMessage(), export(), import()
 
 import { Wallet, JsonRpcProvider } from 'https://esm.sh/ethers@6';
+import { hexToBytes, importAesKey, encryptJson as coreEncryptJson, decryptJson as coreDecryptJson } from './core/crypto_core.js';
 
 const BASE_RPC = window.BOOKISH_BASE_RPC || 'https://mainnet.base.org';
 const STORAGE_KEY = 'bookish.evmWallet.v1';
-
-function hexToBytes(hex){ if(!hex || hex.length%2) throw new Error('bad hex'); const out=new Uint8Array(hex.length/2); for(let i=0;i<out.length;i++) out[i]=parseInt(hex.substr(i*2,2),16); return out; }
-function bytesToBase64(bytes){ let binary=''; for(let i=0;i<bytes.length;i++) binary+=String.fromCharCode(bytes[i]); return btoa(binary); }
-function base64ToBytes(b64){ return Uint8Array.from(atob(b64),c=>c.charCodeAt(0)); }
 
 async function getAesKeyFromSym(){
   const symHex = localStorage.getItem('bookish.sym');
   if(!symHex || !/^[0-9a-fA-F]{64}$/.test(symHex)) return null;
   const raw = hexToBytes(symHex.trim());
-  return await crypto.subtle.importKey('raw', raw, { name:'AES-GCM' }, false, ['encrypt','decrypt']);
+  return await importAesKey(raw);
 }
 
 async function encryptJson(obj){
   const key = await getAesKeyFromSym();
   if(!key) throw new Error('sym-key-missing');
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const pt = new TextEncoder().encode(JSON.stringify(obj));
-  const buf = await crypto.subtle.encrypt({ name:'AES-GCM', iv }, key, pt);
-  const full = new Uint8Array(buf); // ciphertext||tag
-  const tag = full.slice(full.length-16);
-  const ct = full.slice(0, full.length-16);
-  const out = new Uint8Array(12+16+ct.length);
-  out.set(iv,0); out.set(tag,12); out.set(ct,28);
-  return bytesToBase64(out);
+  return coreEncryptJson(key, obj);
 }
 
 async function decryptJson(b64){
   const key = await getAesKeyFromSym();
   if(!key) throw new Error('sym-key-missing');
-  const bytes = base64ToBytes(b64);
-  const iv = bytes.slice(0,12);
-  const tag = bytes.slice(12,28);
-  const ct  = bytes.slice(28);
-  const joined = new Uint8Array(ct.length + tag.length);
-  joined.set(ct,0); joined.set(tag, ct.length);
-  const pt = await crypto.subtle.decrypt({ name:'AES-GCM', iv }, key, joined);
-  return JSON.parse(new TextDecoder().decode(pt));
+  return coreDecryptJson(key, b64);
 }
 
 function getProvider(){ return new JsonRpcProvider(BASE_RPC); }
