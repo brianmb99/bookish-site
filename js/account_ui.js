@@ -16,6 +16,7 @@ import { deriveAndStoreSymmetricKey, hexToBytes, storeSessionEncryptedSeed, getS
 import { ACCOUNT_STORAGE_KEY, PASSKEY_STORAGE_KEY, SEED_SHOWN_KEY } from './core/storage_constants.js';
 import * as storageManager from './core/storage_manager.js';
 import { openOnrampWidget, isCoinbaseOnrampConfigured } from './core/coinbase_onramp.js';
+import { formatBalanceAsBooks, getBalanceStatus } from './core/balance_display.js';
 
 // Global state
 let currentBalanceETH = null;
@@ -186,24 +187,23 @@ async function renderAccountModalContent(container) {
 
       // Get balance
       let balanceText = 'Loading...';
+      let balanceStatus = 'ok';
       let isFunded = false;
       try {
         if (address) {
           const balanceResult = await getWalletBalance(address);
-          const balance = parseFloat(balanceResult.balanceETH || '0');
+          const balanceETH = balanceResult.balanceETH || '0';
+          const balance = parseFloat(balanceETH);
           isFunded = balance >= 0.00002; // MIN_FUNDING_ETH
 
-          if (balance < 0.001) {
-            const balanceGwei = balance * 1e9;
-            balanceText = `${balanceGwei.toFixed(0)} Gwei`;
-          } else {
-            balanceText = `${balance.toFixed(4)} ETH`;
-          }
-          balanceText += isFunded ? '' : ' (underfunded)';
+          // Format as "~X books remaining"
+          balanceText = formatBalanceAsBooks(balanceETH, { showExact: false });
+          balanceStatus = getBalanceStatus(balanceETH);
         }
       } catch (e) {
         console.error('[Bookish:AccountUI] Error getting balance:', e);
         balanceText = 'Error loading balance';
+        balanceStatus = 'empty';
       }
 
       // Determine protection type
@@ -236,8 +236,8 @@ async function renderAccountModalContent(container) {
             </button>
           </div>
         ` : ''}
-        <div class="account-balance" style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">
-          Balance: <span id="accountBalanceDisplay">${balanceText}</span>
+        <div class="account-balance" style="margin-top: 12px; font-size: 0.85rem;">
+          Balance: <span id="accountBalanceDisplay" class="balance-display balance-${balanceStatus}">${balanceText}</span>
         </div>
         <div class="account-protection" style="margin-top: 8px; font-size: 0.85rem; color: #94a3b8;">
           Protection: ${protectionType}
@@ -331,7 +331,10 @@ async function renderAccountModalContent(container) {
 
     document.getElementById('importSeedBtn')?.addEventListener('click', () => {
       closeAccountModal();
-      handleManualLogin();
+      // Wait for accountModal to close before showing seed input modal
+      setTimeout(() => {
+        handleManualSeedLogin();
+      }, 250);
     });
   }
   } catch (error) {
@@ -1078,7 +1081,7 @@ async function handleLogout() {
 
     // I have my recovery phrase saved - proceed with logout
     document.getElementById('haveRecoveryPhraseBtn').onclick = () => {
-      closeAccountModal();
+      closeHelperModal(); // Close the warning dialog (helperModal)
       performLogout();
     };
 
@@ -1087,7 +1090,7 @@ async function handleLogout() {
 
     // Log out without saving - proceed with logout (for users who accept data loss)
     document.getElementById('logoutWithoutSavingBtn').onclick = () => {
-      closeAccountModal();
+      closeHelperModal(); // Close the warning dialog (helperModal)
       performLogout();
     };
     return;
@@ -1981,25 +1984,18 @@ export async function getStoredWalletInfo() {
  */
 export function updateBalanceDisplay(balanceETH) {
   currentBalanceETH = balanceETH;
-  const balanceElement = document.getElementById('walletBalanceDisplay');
+  const balanceElement = document.getElementById('accountBalanceDisplay');
   if (!balanceElement) return;
 
   const balance = parseFloat(balanceETH);
   const isFunded = balance > 0.00002; // ~$0.07 Base ETH
 
-  let formattedBalance;
-  if (balance < 0.001) {
-    const balanceGwei = balance * 1e9;
-    formattedBalance = `${balanceGwei.toFixed(0)} Gwei`;
-  } else {
-    formattedBalance = `${balance.toFixed(4)} ETH`;
-  }
+  // Format as "~X books remaining"
+  const formattedBalance = formatBalanceAsBooks(balanceETH, { showExact: false });
+  const status = getBalanceStatus(balanceETH);
 
-  const fundingStatus = isFunded
-    ? '<span style="color:#10b981;">✓ funded</span>'
-    : '<span style="opacity:.6;">(underfunded)</span>';
-
-  balanceElement.innerHTML = `${formattedBalance} ${fundingStatus}`;
+  balanceElement.textContent = formattedBalance;
+  balanceElement.className = `balance-display balance-${status}`;
 
   // Update "Buy Storage" buttons visibility based on funding status
   updateBuyStorageButtonVisibility(isFunded).catch(err => {
