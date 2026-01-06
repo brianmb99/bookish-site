@@ -272,6 +272,38 @@ button.secondary:hover, .btn.secondary:hover{
 .celebration-toast{background:linear-gradient(135deg,#1e3a5f 0%,#1e293b 100%)}
 
 /* Account nudge banner */
+.account-banner{
+  background:linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%);
+  border:1px solid rgba(37,99,235,0.25);
+  border-radius:8px;
+  padding:12px 16px;
+  margin:16px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  font-size:0.875rem;
+  color:#e2e8f0;
+  animation:fadeIn .3s ease-out;
+}
+.account-banner-content{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.account-banner-dismiss{
+  background:none;
+  border:none;
+  color:#64748b;
+  font-size:1.25rem;
+  cursor:pointer;
+  padding:4px 8px;
+  border-radius:4px;
+  transition:color 0.2s, background 0.2s;
+}
+.account-banner-dismiss:hover{
+  color:#e2e8f0;
+  background:#334155;
+}
 .nudge-banner{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:14px 16px;margin:16px 0;display:flex;align-items:center;justify-content:space-between;animation:fadeIn .3s ease-out}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
 .nudge-content{display:flex;align-items:center;gap:12px}
@@ -282,6 +314,126 @@ button.secondary:hover, .btn.secondary:hover{
 .nudge-cta:hover{color:#93c5fd;text-decoration:underline}
 .nudge-dismiss{background:transparent;border:none;color:#64748b;font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:4px}
 .nudge-dismiss:hover{color:#94a3b8;background:#334155}
+/* Account modal styles */
+.modal-overlay{
+  position:fixed;
+  inset:0;
+  z-index:1000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+}
+.modal-backdrop{
+  position:absolute;
+  inset:0;
+  background:rgba(0,0,0,0.5);
+  backdrop-filter:blur(2px);
+  z-index:1000;
+  pointer-events:auto;
+}
+.account-modal{
+  /* Override .modal class positioning - this is a flex child, not fixed positioned */
+  position:relative !important;
+  inset:auto !important;
+  /* Override .modal display:none */
+  display:block !important;
+  /* Reset other .modal properties that interfere */
+  background:#0f172a;
+  border:1px solid #334155;
+  border-radius:12px;
+  padding:32px;
+  width:min(440px,calc(100vw - 32px));
+  max-height:calc(100vh - 64px);
+  overflow-y:auto;
+  box-shadow:0 25px 50px -12px rgba(0,0,0,0.5);
+  z-index:1001;
+  opacity:1;
+  transform:scale(1);
+  transition:opacity 0.2s ease, transform 0.2s ease;
+  pointer-events:auto;
+  visibility:visible;
+  /* Ensure it's centered by flex parent */
+  margin:auto;
+}
+.modal-overlay:not([style*="display: none"]) .account-modal{
+  opacity:1;
+  transform:scale(1);
+  visibility:visible;
+}
+.modal-overlay.open .account-modal{
+  opacity:1;
+  transform:scale(1);
+  visibility:visible;
+}
+@media (max-width:480px){
+  .account-modal{
+    width:calc(100vw - 24px);
+    padding:24px;
+    border-radius:16px;
+  }
+}
+.account-modal .modal-close{
+  position:absolute;
+  top:16px;
+  right:16px;
+  background:none;
+  border:none;
+  color:#64748b;
+  font-size:1.5rem;
+  cursor:pointer;
+  width:40px;
+  height:40px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:8px;
+  transition:color 0.2s, background 0.2s;
+}
+.account-modal .modal-close:hover{
+  color:#e2e8f0;
+  background:#1e293b;
+}
+.account-modal h2{
+  margin:0 0 24px 0;
+  font-size:1.25rem;
+  font-weight:600;
+}
+.account-info{
+  margin-bottom:24px;
+}
+.account-name{
+  font-size:1.1rem;
+  font-weight:500;
+  margin-bottom:4px;
+}
+.account-address{
+  font-size:0.8rem;
+  color:#64748b;
+  font-family:var(--font-mono);
+}
+.account-actions{
+  display:flex;
+  flex-direction:column;
+  gap:12px;
+}
+.account-actions .btn{
+  width:100%;
+  padding:14px 20px;
+}
+.account-link{
+  display:block;
+  margin-top:20px;
+  padding-top:16px;
+  border-top:1px solid #334155;
+  color:#64748b;
+  font-size:0.8rem;
+  text-decoration:none;
+  cursor:pointer;
+}
+.account-link:hover{
+  color:#94a3b8;
+}
 footer{margin-top:40px;font-size:.55rem;opacity:.4;text-align:center}
 form.inline label{display:block;font-size:.65rem;margin-top:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 form.inline input,form.inline select,form.inline textarea{
@@ -314,7 +466,7 @@ form.inline label{
   position:fixed;
   inset:0;
   display:none;
-  align-items:flex-start;
+  align-items:center;
   justify-content:center;
   background:rgba(0,0,0,.7);
   backdrop-filter:blur(8px);
@@ -323,6 +475,10 @@ form.inline label{
   z-index:5000;
 }
 .modal.active{display:flex}
+/* Helper modal (for sub-dialogs) should appear on top of account modal */
+#helperModal{
+  z-index:1002;
+}
 .modal-inner{
   background:var(--color-bg-elevated);
   border:1px solid var(--color-border-default);
@@ -357,6 +513,10 @@ form.inline label{
   font-size:16px;
   cursor:pointer;
   transition:all .2s ease;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  line-height:1;
 }
 .close:hover{
   background:var(--color-border-subtle);

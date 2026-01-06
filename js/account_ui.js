@@ -28,6 +28,8 @@ const transientState = {
   createdTime: 0
 };
 
+const BANNER_DISMISSED_KEY = 'bookish_account_banner_dismissed';
+
 /**
  * Get account status for UI status manager
  * @returns {Object} { isLoggedIn, isPersisted, justSignedIn, signInTime, justCreated, createdTime }
@@ -54,131 +56,381 @@ export async function initAccountUI() {
 
   // Coinbase Pay requires no configuration - always available via direct link
 
-  // Find or create account section inside accountPanel
-  const accountPanel = document.getElementById('accountPanel');
-  if (!accountPanel) {
-    console.warn('[Bookish:AccountUI] Account panel not found');
+  // Setup modal event listeners
+  setupAccountModalListeners();
+
+  // Show account banner if needed
+  showAccountBannerIfNeeded();
+}
+
+/**
+ * Open account modal
+ */
+export async function openAccountModal() {
+  const modal = document.getElementById('accountModal');
+  const content = document.getElementById('accountModalContent');
+  if (!modal || !content) {
+    console.warn('[Bookish:AccountUI] Account modal not found', { modal: !!modal, content: !!content });
     return;
   }
 
-  let section = document.getElementById('accountManagementSection');
-  if (!section) {
-    section = document.createElement('div');
-    section.id = 'accountManagementSection';
-    section.style.cssText = 'margin-top:12px;padding-top:12px;border-top:1px solid #334155;';
-    accountPanel.querySelector('div[style*="grid"]')?.after(section);
-  }
+  // Prevent backdrop clicks for a short time after opening
+  modal.dataset.allowClose = 'false';
 
-  // Check if account exists AND symmetric key is available (logged in)
-  const hasAccount = !!localStorage.getItem(ACCOUNT_STORAGE_KEY);
-  const hasSymKey = !!localStorage.getItem('bookish.sym');
+  try {
+    console.log('[Bookish:AccountUI] Opening account modal...');
 
-  if (hasAccount && hasSymKey) {
-    // Show logged-in state
-    await updateAccountSection(section, true);
-  } else {
-    // Show logged-out state (Create / Import / Sign In)
-    await updateAccountSection(section, false);
+    // Render content (await since it's async)
+    await renderAccountModalContent(content);
+    console.log('[Bookish:AccountUI] Content rendered, innerHTML length:', content.innerHTML.length);
+
+    // Show modal
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Ensure modal content is visible
+    const modalContent = modal.querySelector('.account-modal');
+    if (modalContent) {
+      modalContent.style.visibility = 'visible';
+      modalContent.style.opacity = '1';
+      modalContent.style.display = 'block';
+    }
+
+    // Force a reflow to ensure display:flex is applied
+    void modal.offsetHeight;
+
+    // Animate in
+    requestAnimationFrame(() => {
+      modal.classList.add('open');
+      console.log('[Bookish:AccountUI] Modal opened, classList:', modal.classList.toString());
+      console.log('[Bookish:AccountUI] Modal content element:', modalContent, 'display:', modalContent?.style.display, 'visibility:', modalContent?.style.visibility);
+
+      // Allow backdrop clicks after animation starts
+      setTimeout(() => {
+        modal.dataset.allowClose = 'true';
+      }, 100);
+    });
+  } catch (error) {
+    console.error('[Bookish:AccountUI] Error opening account modal:', error);
+    console.error('[Bookish:AccountUI] Error stack:', error.stack);
+    // Close modal on error
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+    modal.dataset.allowClose = 'true';
   }
 }
 
 /**
- * Update account section UI based on state
+ * Close account modal
  */
-async function updateAccountSection(section, isLoggedIn) {
-  if (isLoggedIn) {
-    const walletInfo = await getStoredWalletInfo();
-    const passkeyMeta = getPasskeyMetadata();
-    const isPasskey = isPasskeyProtected();
+export function closeAccountModal() {
+  const modal = document.getElementById('accountModal');
+  if (!modal) return;
 
-    const persistenceState = determineAccountPersistenceState();
-    const persistenceIndicator = getPersistenceIndicatorHTML(persistenceState);
+  console.log('[Bookish:AccountUI] Closing account modal');
+  modal.classList.remove('open');
+  document.body.style.overflow = '';
 
-    // Get display name from account storage
-    const accountData = localStorage.getItem(ACCOUNT_STORAGE_KEY);
-    let displayName = 'User';
-    if (accountData) {
-      try {
-        const accountObj = JSON.parse(accountData);
-        displayName = accountObj.displayName || passkeyMeta?.userDisplayName || 'User';
-      } catch (e) {
-        console.error('[Bookish:AccountUI] Failed to parse account data:', e);
-      }
+  // Wait for animation before hiding
+  setTimeout(() => {
+    modal.style.display = 'none';
+    // Clear backdrop listener flag so it can be reattached next time
+    const backdrop = modal.querySelector('.modal-backdrop');
+    if (backdrop) {
+      backdrop.dataset.listenerAttached = '';
     }
+  }, 200);
+}
 
-    // Check if balance is low (need to fetch if not available)
-    const balance = currentBalanceETH ? parseFloat(currentBalanceETH) : null;
-    const isFunded = balance !== null && balance >= 0.00002; // MIN_FUNDING_ETH
-    // Always show Buy Storage buttons when logged in (users can add more funds anytime)
-    const showBuyStorage = walletInfo?.address && isCoinbaseOnrampConfigured();
+/**
+ * Render account modal content
+ */
+async function renderAccountModalContent(container) {
+  try {
+    const isLoggedIn = storageManager.isLoggedIn();
+    console.log('[Bookish:AccountUI] Rendering modal content, isLoggedIn:', isLoggedIn);
 
-    section.innerHTML = `
-      <h2>Account ${persistenceIndicator}</h2>
-      <div class="account-details">
-        <div class="account-row">
-          <span class="label">Name:</span>
-          <span class="value">${displayName}</span>
+    if (isLoggedIn) {
+      let walletInfo, passkeyMeta, persistenceState, persistenceIndicator;
+
+      try {
+        walletInfo = await getStoredWalletInfo();
+        console.log('[Bookish:AccountUI] Got wallet info:', !!walletInfo);
+      } catch (e) {
+        console.error('[Bookish:AccountUI] Error getting wallet info:', e);
+        walletInfo = null;
+      }
+
+      try {
+        passkeyMeta = getPasskeyMetadata();
+        console.log('[Bookish:AccountUI] Got passkey meta:', !!passkeyMeta);
+      } catch (e) {
+        console.error('[Bookish:AccountUI] Error getting passkey meta:', e);
+        passkeyMeta = null;
+      }
+
+      const accountData = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+      let displayName = 'Anonymous';
+      if (accountData) {
+        try {
+          const accountObj = JSON.parse(accountData);
+          displayName = accountObj.displayName || passkeyMeta?.userDisplayName || 'Anonymous';
+        } catch (e) {
+          console.error('[Bookish:AccountUI] Failed to parse account data:', e);
+        }
+      }
+
+      const address = walletInfo?.address || '';
+      const shortAddress = address ? `${address.slice(0, 6)}...${address.slice(-4)}` : '';
+      const fullAddress = address || '';
+
+      // Get balance
+      let balanceText = 'Loading...';
+      let isFunded = false;
+      try {
+        if (address) {
+          const balanceResult = await getWalletBalance(address);
+          const balance = parseFloat(balanceResult.balanceETH || '0');
+          isFunded = balance >= 0.00002; // MIN_FUNDING_ETH
+
+          if (balance < 0.001) {
+            const balanceGwei = balance * 1e9;
+            balanceText = `${balanceGwei.toFixed(0)} Gwei`;
+          } else {
+            balanceText = `${balance.toFixed(4)} ETH`;
+          }
+          balanceText += isFunded ? '' : ' (underfunded)';
+        }
+      } catch (e) {
+        console.error('[Bookish:AccountUI] Error getting balance:', e);
+        balanceText = 'Error loading balance';
+      }
+
+      // Determine protection type
+      const isProtected = isPasskeyProtected();
+      const protectionType = isProtected ? '🔐 Passkey' : '🔑 Manual Seed';
+
+      // Check if account is backed up
+      try {
+        persistenceState = determineAccountPersistenceState();
+        persistenceIndicator = getPersistenceIndicatorHTML(persistenceState);
+        console.log('[Bookish:AccountUI] Got persistence state:', persistenceState);
+      } catch (e) {
+        console.error('[Bookish:AccountUI] Error getting persistence state:', e);
+        persistenceState = 'local';
+        persistenceIndicator = '';
+      }
+      const isBackedUp = persistenceState === 'confirmed';
+
+    container.innerHTML = `
+      <h2>Your Account ${persistenceIndicator}</h2>
+
+      <div class="account-info">
+        <div class="account-name">👤 ${displayName}</div>
+        ${fullAddress ? `
+          <div class="account-address-row" style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
+            <span style="font-size: 0.8rem; color: #64748b;">Address:</span>
+            <span class="account-address" style="font-family: var(--font-mono); font-size: 0.8rem; color: #94a3b8;">${shortAddress}</span>
+            <button id="copyAddressBtn" class="btn-icon" style="background: transparent; border: 1px solid #334155; color: #94a3b8; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;" title="Copy address">
+              📋 Copy
+            </button>
+          </div>
+        ` : ''}
+        <div class="account-balance" style="margin-top: 12px; font-size: 0.85rem; color: #94a3b8;">
+          Balance: <span id="accountBalanceDisplay">${balanceText}</span>
         </div>
-        <div class="account-row">
-          <span class="label">Address:</span>
-          <span class="value">
-            <code id="walletAddressDisplay">${walletInfo?.address ? formatAddress(walletInfo.address) : 'Loading...'}</code>
-            <button id="copyAddressBtn" class="btn-icon" title="Copy address">📋</button>
-          </span>
-        </div>
-        <div class="account-row">
-          <span class="label">Balance:</span>
-          <span class="value" id="walletBalanceDisplay">Loading...</span>
-        </div>
-        <div class="account-row">
-          <span class="label">Protection:</span>
-          <span class="value">${isPasskey ? '🔐 Passkey' : '🔑 Manual Seed'}</span>
+        <div class="account-protection" style="margin-top: 8px; font-size: 0.85rem; color: #94a3b8;">
+          Protection: ${protectionType}
         </div>
       </div>
-      <div class="account-actions">
-        ${showBuyStorage ? '<button id="buyCoinbaseBtn" class="btn" style="background:#2563eb;color:white;">☁️ Enable Cloud Backup</button>' : ''}
-        <button id="logoutBtn" class="btn secondary">Log Out</button>
-        <button id="viewSeedBtn" class="btn secondary">View Recovery Phrase</button>
-        ${isPasskey
-          ? '<button id="passkeyProtectedBtn" class="btn" disabled>Protected via Passkey</button>'
-          : '<button id="addPasskeyBtn" class="btn">Protect with Passkey</button>'
-        }
+
+      <div class="account-actions" style="margin-top: 24px;">
+        ${!isBackedUp ? `<button id="enableBackupBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">Enable Cloud Backup</button>` : ''}
+        ${!isProtected ? `<button id="protectPasskeyBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">Protect with Passkey</button>` : ''}
+        <div style="display: flex; gap: 12px; margin-top: 12px;">
+          <button id="logoutBtn" class="btn secondary" style="flex: 1;">Log Out</button>
+          <button id="viewRecoveryBtn" class="btn secondary" style="flex: 1;">Recovery Phrase</button>
+        </div>
       </div>
     `;
 
-    // Wire up buttons
-    document.getElementById('copyAddressBtn')?.addEventListener('click', () => {
-      if (walletInfo?.address) {
-        copyAddressToClipboard(walletInfo.address);
+    // Setup event listeners for logged-in state
+    document.getElementById('copyAddressBtn')?.addEventListener('click', async () => {
+      if (fullAddress) {
+        try {
+          await copyAddressToClipboard(fullAddress);
+          const btn = document.getElementById('copyAddressBtn');
+          if (btn) {
+            const originalText = btn.innerHTML;
+            btn.innerHTML = '✓ Copied';
+            btn.style.color = '#10b981';
+            setTimeout(() => {
+              btn.innerHTML = originalText;
+              btn.style.color = '#94a3b8';
+            }, 2000);
+          }
+        } catch (e) {
+          console.error('[Bookish:AccountUI] Failed to copy address:', e);
+        }
       }
     });
 
-    document.getElementById('logoutBtn')?.addEventListener('click', handleLogout);
-    document.getElementById('viewSeedBtn')?.addEventListener('click', handleViewSeed);
-    document.getElementById('addPasskeyBtn')?.addEventListener('click', handleAddPasskey);
-    document.getElementById('buyCoinbaseBtn')?.addEventListener('click', handleBuyStorage);
-    document.getElementById('buyTransakBtn')?.addEventListener('click', handleBuyTransak);
+    document.getElementById('enableBackupBtn')?.addEventListener('click', () => {
+      // DO NOT close account modal - open funding dialog on top
+      handleBuyStorage();
+    });
 
+    document.getElementById('protectPasskeyBtn')?.addEventListener('click', () => {
+      // DO NOT close account modal - open passkey flow on top
+      handleAddPasskey();
+    });
+
+    document.getElementById('logoutBtn')?.addEventListener('click', () => {
+      // Logout can close the modal (terminal action)
+      closeAccountModal();
+      handleLogout();
+    });
+
+    document.getElementById('viewRecoveryBtn')?.addEventListener('click', () => {
+      // DO NOT close account modal - open recovery phrase view on top
+      handleViewSeed();
+    });
   } else {
-    // Logged out state - friendly, passkey-first messaging
-    section.innerHTML = `
+    container.innerHTML = `
       <h2>Account</h2>
-      <p style="margin:12px 0;opacity:.9;line-height:1.5;">Save your books across all your devices with a free account.</p>
-      <div class="account-actions" style="display:flex;flex-direction:column;gap:12px;">
-        <button id="createAccountBtn" class="btn primary" style="width:100%;padding:14px 20px;font-size:1rem;background:#2563eb;">Create Account</button>
-        <div style="font-size:.8rem;opacity:.7;text-align:center;margin-top:4px;">Already have an account?</div>
-        <div style="display:flex;gap:8px;justify-content:center;">
-          <button id="loginBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.8rem;cursor:pointer;text-decoration:underline;">Sign in with passkey</button>
-          <span style="color:#475569;font-size:.8rem;">·</span>
-          <button id="importSeedBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.8rem;cursor:pointer;text-decoration:underline;">Use recovery phrase</button>
+
+      <p style="margin: 0 0 24px 0; line-height: 1.6; opacity: 0.9;">
+        Your books, on any device. Create an account to get started.
+      </p>
+
+      <div class="account-actions">
+        <button id="createAccountBtn" class="btn primary">Create Account</button>
+      </div>
+
+      <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #334155;">
+        <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 12px;">
+          Already have an account?
+        </div>
+        <div style="display: flex; gap: 16px;">
+          <button id="loginBtn" class="btn-link" style="font-size: 0.85rem;">Sign in with passkey</button>
+          <button id="importSeedBtn" class="btn-link" style="font-size: 0.85rem;">Use recovery phrase</button>
         </div>
       </div>
     `;
 
-    document.getElementById('createAccountBtn')?.addEventListener('click', handleCreateAccount);
-    document.getElementById('loginBtn')?.addEventListener('click', handleLogin);
-    document.getElementById('importSeedBtn')?.addEventListener('click', handleManualSeedLogin);
+    // Setup event listeners for logged-out state
+    document.getElementById('createAccountBtn')?.addEventListener('click', () => {
+      closeAccountModal();
+      handleCreateAccount();
+    });
+
+    document.getElementById('loginBtn')?.addEventListener('click', () => {
+      closeAccountModal();
+      handleCrossDeviceSignIn();
+    });
+
+    document.getElementById('importSeedBtn')?.addEventListener('click', () => {
+      closeAccountModal();
+      handleManualLogin();
+    });
   }
+  } catch (error) {
+    console.error('[Bookish:AccountUI] Error in renderAccountModalContent:', error);
+    console.error('[Bookish:AccountUI] Error stack:', error.stack);
+    // Render error state
+    container.innerHTML = `
+      <h2>Account</h2>
+      <p style="color: #ef4444;">Error loading account information. Please try again.</p>
+      <button onclick="window.location.reload()" class="btn primary">Reload Page</button>
+    `;
+    throw error; // Re-throw so openAccountModal can handle it
+  }
+}
+
+/**
+ * Setup account modal event listeners
+ */
+function setupAccountModalListeners() {
+  const modal = document.getElementById('accountModal');
+  if (!modal) return;
+
+  // Setup backdrop click handler (only once, use flag to prevent duplicates)
+  const backdrop = modal.querySelector('.modal-backdrop');
+  if (backdrop && !backdrop.dataset.listenerAttached) {
+    backdrop.dataset.listenerAttached = 'true';
+    backdrop.addEventListener('click', (e) => {
+      // Only close if clicking the backdrop itself, not children, and if allowed
+      const modal = document.getElementById('accountModal');
+      if (modal && modal.dataset.allowClose === 'true' && e.target === backdrop) {
+        console.log('[Bookish:AccountUI] Backdrop clicked, closing modal');
+        e.stopPropagation();
+        closeAccountModal();
+      } else {
+        console.log('[Bookish:AccountUI] Backdrop click ignored', { allowClose: modal?.dataset.allowClose, target: e.target, backdrop });
+      }
+    });
+  }
+
+  // Close on close button click
+  const closeBtn = document.getElementById('accountModalClose');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', closeAccountModal);
+  }
+
+  // Close on Escape key (remove old handler first)
+  const escHandler = (e) => {
+    if (e.key === 'Escape' && modal.style.display === 'flex') {
+      closeAccountModal();
+    }
+  };
+  // Remove any existing handler
+  document.removeEventListener('keydown', escHandler);
+  document.addEventListener('keydown', escHandler);
+}
+
+/**
+ * Show account banner for first-time visitors (when not logged in)
+ */
+function showAccountBannerIfNeeded() {
+  const banner = document.getElementById('accountBanner');
+  if (!banner) return;
+
+  // Don't show if logged in
+  if (storageManager.isLoggedIn()) {
+    banner.style.display = 'none';
+    return;
+  }
+
+  // Don't show if previously dismissed
+  if (localStorage.getItem(BANNER_DISMISSED_KEY) === 'true') {
+    banner.style.display = 'none';
+    return;
+  }
+
+  // Show banner
+  banner.style.display = 'flex';
+  banner.innerHTML = `
+    <div class="account-banner-content">
+      <span>💡</span>
+      <span>Create an account to access your books from any device</span>
+    </div>
+    <button class="account-banner-dismiss" id="dismissBannerBtn" aria-label="Dismiss">×</button>
+  `;
+
+  document.getElementById('dismissBannerBtn').addEventListener('click', () => {
+    localStorage.setItem(BANNER_DISMISSED_KEY, 'true');
+    banner.style.display = 'none';
+  });
+}
+
+/**
+ * Update account section UI based on state
+ * DEPRECATED: This function is no longer used. Account UI is now rendered in the modal via renderAccountModalContent().
+ * Kept for backward compatibility but does nothing.
+ */
+async function updateAccountSection(section, isLoggedIn) {
+  // Modal content is rendered dynamically when modal opens
+  // No need to update a persistent section anymore
 }
 
 /**
@@ -495,8 +747,9 @@ function showSuccessModal(displayName, isPasskey) {
   // Helper to complete setup and start sync
   const completeSetup = async () => {
     closeAccountModal();
-    const section = document.getElementById('accountManagementSection');
-    if (section) await updateAccountSection(section, true);
+    // Hide banner after account creation
+    const banner = document.getElementById('accountBanner');
+    if (banner) banner.style.display = 'none';
     uiStatusManager.refresh();
     console.log('[Bookish:AccountUI] Account created, starting sync loop');
     startSync();
@@ -572,9 +825,7 @@ async function handlePasskeyLogin() {
     await window.bookishWallet.ensure();
     await storeSessionEncryptedSeed(seed);
 
-    // Refresh UI to logged-in state
-    const section = document.getElementById('accountManagementSection');
-    if (section) updateAccountSection(section, true);
+    // Refresh UI state
     transientState.justSignedIn = true;
     transientState.signInTime = Date.now();
     setTimeout(() => { transientState.justSignedIn = false; uiStatusManager.refresh(); }, 3000);
@@ -601,9 +852,9 @@ async function handleCrossDeviceSignIn() {
     await window.bookishWallet.ensure();
     await storeSessionEncryptedSeed(result.seed);
 
-    // Update UI - will show green light and display name from restored account
-    const section = document.getElementById('accountManagementSection');
-    if (section) await updateAccountSection(section, true);
+    // Hide banner after login
+    const banner = document.getElementById('accountBanner');
+    if (banner) banner.style.display = 'none';
 
     // Start sync loop now that user is logged in
     console.log('[Bookish:AccountUI] Login successful, starting sync loop');
@@ -651,7 +902,7 @@ async function handleCrossDeviceSignIn() {
         closeAccountModal();
         handleManualSeedLogin();
       };
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
     } else if (isCancelled) {
       // Show simple retry message for cancelled/timed out
       showAccountModal(`
@@ -669,7 +920,7 @@ async function handleCrossDeviceSignIn() {
         closeAccountModal();
         handleCrossDeviceSignIn();
       };
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
     } else {
       // Generic error
       showAccountModal(`
@@ -682,7 +933,7 @@ async function handleCrossDeviceSignIn() {
         </div>
       `);
 
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
     }
 
     uiStatusManager.refresh();
@@ -762,8 +1013,9 @@ function handleManualSeedLogin() {
 
       setTimeout(() => {
         closeAccountModal();
-        const section = document.getElementById('accountManagementSection');
-        if (section) updateAccountSection(section, true);
+        // Hide banner after login
+        const banner = document.getElementById('accountBanner');
+        if (banner) banner.style.display = 'none';
       }, 1000);
 
     } catch (error) {
@@ -831,7 +1083,7 @@ async function handleLogout() {
     };
 
     // Cancel - return to app
-    document.getElementById('cancelLogoutBtn').onclick = closeAccountModal;
+    document.getElementById('cancelLogoutBtn').onclick = closeHelperModal;
 
     // Log out without saving - proceed with logout (for users who accept data loss)
     document.getElementById('logoutWithoutSavingBtn').onclick = () => {
@@ -872,11 +1124,15 @@ async function performLogout() {
   // Refresh UI to logged-out state
   initAccountUI();
 
+  // Show banner after logout (if not dismissed)
+  showAccountBannerIfNeeded();
+
   console.log('[Bookish:AccountUI] Logged out');
 }
 
 /**
  * Handle view seed
+ * NOTE: Does NOT close account modal - opens recovery phrase view on top
  */
 async function handleViewSeed() {
   if (isPasskeyProtected()) {
@@ -929,7 +1185,7 @@ async function handleViewSeed() {
             Your recovery phrase is only stored in memory during this session. Please log in again to view it.
           </p>
           <div style="text-align:center;margin:24px 0;">
-            <button onclick="window.accountUI.closeAccountModal()" class="btn">Close</button>
+            <button onclick="window.accountUI.closeHelperModal()" class="btn">Close</button>
           </div>
         `);
       }
@@ -983,7 +1239,7 @@ function showSeedPhraseModal(seed) {
     }
   };
 
-  document.getElementById('closeSeedBtn').onclick = closeAccountModal;
+  document.getElementById('closeSeedBtn').onclick = closeHelperModal;
 }
 
 /**
@@ -1006,9 +1262,7 @@ async function handleAddPasskey() {
 
       uiStatusManager.refresh();
 
-      // Refresh UI to show new protection status
-      const section = document.getElementById('accountManagementSection');
-      if (section) await updateAccountSection(section, true);
+      // UI will refresh when modal is reopened
 
       // Trigger persistence check (will auto-persist if funded)
       if (window.bookishSyncManager?.triggerPersistenceCheck) {
@@ -1031,7 +1285,7 @@ async function handleAddPasskey() {
           <button id="closeErrorBtn" class="btn" style="width:100%;">OK</button>
         </div>
       `);
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
     }
   } else {
     // User is not logged in or seed not in session - ask for seed phrase
@@ -1057,7 +1311,7 @@ async function handleAddPasskey() {
       </div>
     `);
 
-    document.getElementById('cancelAddPasskeyBtn').onclick = closeAccountModal;
+    document.getElementById('cancelAddPasskeyBtn').onclick = closeHelperModal;
     document.getElementById('pasteSeedBtn').onclick = async () => {
       try {
         const text = await navigator.clipboard.readText();
@@ -1107,9 +1361,7 @@ async function handleAddPasskey() {
         closeAccountModal();
         uiStatusManager.refresh();
 
-        // Refresh UI to show new protection status
-        const section = document.getElementById('accountManagementSection');
-        if (section) await updateAccountSection(section, true);
+        // UI will refresh when modal is reopened
 
       } catch (error) {
         console.error('[Bookish:AccountUI] Failed to add passkey protection:', error);
@@ -1135,7 +1387,7 @@ function handleBuyTransak() {
       <button id="closeComingSoonBtn" class="btn">Got it</button>
     </div>
   `);
-  document.getElementById('closeComingSoonBtn').onclick = closeAccountModal;
+  document.getElementById('closeComingSoonBtn').onclick = closeHelperModal;
 }
 
 /**
@@ -1379,7 +1631,7 @@ async function handleBuyStorage() {
           <button id="closeErrorBtn" class="btn">OK</button>
         </div>
       `);
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
       return;
     }
 
@@ -1397,7 +1649,7 @@ async function handleBuyStorage() {
         <button id="closeErrorBtn" class="btn">OK</button>
       </div>
     `);
-    document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+    document.getElementById('closeErrorBtn').onclick = closeHelperModal;
   }
 }
 
@@ -1468,7 +1720,7 @@ function openCoinbaseOnrampWithInstructions(address) {
           <button id="closeErrorBtn" class="btn">OK</button>
         </div>
       `);
-      document.getElementById('closeErrorBtn').onclick = closeAccountModal;
+      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
       if (showManualOption) {
         document.getElementById('copyAddressManualBtn').onclick = async () => {
           try {
@@ -1622,8 +1874,7 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
 
       uiStatusManager.refresh();
 
-      const section = document.getElementById('accountManagementSection');
-      if (section) updateAccountSection(section, true);
+      // UI will refresh when modal is reopened
 
       // Phase 3: Show success modal if progress modal was showing
       if (window.__fundingProgressState) {
@@ -1704,13 +1955,8 @@ function getPersistenceIndicatorHTML(state) {
  * Update persistence indicator
  */
 function updateAccountPersistenceIndicator(state) {
-  const section = document.getElementById('accountManagementSection');
-  if (!section) return;
-
-  const h2 = section.querySelector('h2');
-  if (!h2) return;
-
-  h2.innerHTML = `Account ${getPersistenceIndicatorHTML(state)}`;
+  // Modal content is rendered fresh each time it opens, so no need to update here
+  // This function is kept for backward compatibility but does nothing
 }
 
 /**
@@ -1784,25 +2030,38 @@ async function updateBuyStorageButtonVisibility(isFunded) {
  * Modal helpers
  */
 function showAccountModal(content, showClose = true) {
-  let modal = document.getElementById('accountModal');
-  if (!modal) {
-    modal = document.createElement('div');
-    modal.id = 'accountModal';
-    modal.className = 'modal';
-    document.body.appendChild(modal);
+  // Create helper modal for various account-related modals (recovery phrase, success, etc.)
+  // This is separate from the main account panel modal
+  // When account modal is open, this should appear ON TOP with higher z-index
+  const accountModal = document.getElementById('accountModal');
+  const isAccountModalOpen = accountModal && accountModal.style.display === 'flex';
+
+  let helperModal = document.getElementById('helperModal');
+  if (!helperModal) {
+    helperModal = document.createElement('div');
+    helperModal.id = 'helperModal';
+    helperModal.className = 'modal';
+    document.body.appendChild(helperModal);
   }
 
-  modal.innerHTML = `
+  // If account modal is open, use higher z-index to appear on top
+  if (isAccountModalOpen) {
+    helperModal.style.zIndex = '1002'; // Higher than account modal (1000)
+  } else {
+    helperModal.style.zIndex = '5000'; // Default z-index
+  }
+
+  helperModal.innerHTML = `
     <div class="modal-content">
-      ${showClose ? '<button class="modal-close" onclick="window.accountUI.closeAccountModal()">×</button>' : ''}
+      ${showClose ? '<button class="modal-close" onclick="window.accountUI.closeHelperModal()">×</button>' : ''}
       ${content}
     </div>
   `;
-  modal.style.display = 'flex';
+  helperModal.style.display = 'flex';
 }
 
-function closeAccountModal() {
-  const modal = document.getElementById('accountModal');
+function closeHelperModal() {
+  const modal = document.getElementById('helperModal');
   if (modal) {
     modal.style.display = 'none';
   }
@@ -1811,6 +2070,7 @@ function closeAccountModal() {
 // Export for use in HTML onclick handlers
 window.accountUI = {
   closeAccountModal,
+  closeHelperModal,
   handlePersistAccountToArweave,
   updateBalanceDisplay
 };

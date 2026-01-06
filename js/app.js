@@ -192,13 +192,60 @@ fundRetryBtn?.addEventListener('click', async ()=>{
   }catch{ walletError='Retry failed'; uiStatusManager.refresh(); }
 });
 
-// --- Account panel logic ---
+// --- Account modal logic ---
 // Account UI handles all updates via account_ui.js
-function openAccount(){ if(accountPanel) accountPanel.style.display='block'; }
-function closeAccount(){ if(accountPanel) accountPanel.style.display='none'; }
-accountBtn?.addEventListener('click', openAccount);
-if(accountBtn){ accountBtn.onclick = openAccount; }
-accountClose?.addEventListener('click', closeAccount);
+// Import modal functions from account_ui.js
+let openAccountModal;
+(async function setupAccountButton() {
+  try {
+    // Wait for DOM to be ready if needed
+    if (document.readyState === 'loading') {
+      await new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve));
+    }
+
+    const accountUI = await import('./account_ui.js');
+    if (!accountUI || !accountUI.openAccountModal) {
+      console.error('[Bookish] Failed to import openAccountModal from account_ui.js', accountUI);
+      return;
+    }
+    openAccountModal = accountUI.openAccountModal;
+
+    // Get button reference (may not exist at module load time)
+    const btn = document.getElementById('accountBtn');
+    if(btn) {
+      const clickHandler = async () => {
+        console.log('[Bookish] Account button clicked');
+        if(openAccountModal) {
+          try {
+            await openAccountModal();
+          } catch (error) {
+            console.error('[Bookish] Error opening account modal:', error);
+          }
+        } else {
+          console.error('[Bookish] openAccountModal is not defined');
+        }
+      };
+      btn.addEventListener('click', clickHandler);
+      btn.onclick = clickHandler;
+      console.log('[Bookish] Account button wired up successfully');
+    } else {
+      console.warn('[Bookish] accountBtn not found in DOM, retrying...');
+      // Retry after a short delay in case DOM isn't ready yet
+      setTimeout(() => {
+        const retryBtn = document.getElementById('accountBtn');
+        if (retryBtn && openAccountModal) {
+          retryBtn.addEventListener('click', () => openAccountModal());
+          retryBtn.onclick = () => openAccountModal();
+          console.log('[Bookish] Account button wired up on retry');
+        } else {
+          console.error('[Bookish] Failed to wire up account button after retry');
+        }
+      }, 100);
+    }
+  } catch (error) {
+    console.error('[Bookish] Failed to load account_ui.js:', error);
+  }
+})();
 
 // No settings UI anymore; defaults used
 
@@ -754,6 +801,11 @@ window.bookishSyncManager = { getSyncStatus: getSyncStatusForUI, triggerPersiste
 // --- Geek panel wiring ---
 function updateGeekPanel(){
   if(!geekBody) return;
+  // Hide sync status when not logged in
+  if(!storageManager.isLoggedIn()){
+    geekBody.textContent = 'Sign in to view sync status';
+    return;
+  }
   const net = window.bookishNet || { reads:{ irys:0, arweave:0, errors:0 } };
   geekBody.textContent = `Reads – Irys: ${net.reads.irys||0}, Arweave: ${net.reads.arweave||0}, Errors: ${net.reads.errors||0}`;
 }

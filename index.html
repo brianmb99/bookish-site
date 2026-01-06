@@ -33,6 +33,7 @@
 <div style="display:flex;gap:8px;margin:4px 0 12px">
   <button id="newBtn" class="new-compact" title="Add new">＋ New</button>
 </div>
+<div id="accountBanner" class="account-banner" style="display:none;"></div>
 <div id="accountNudgeBanner" class="nudge-banner" style="display:none;">
   <div class="nudge-content">
     <span class="nudge-icon">💡</span>
@@ -44,12 +45,12 @@
   <button id="nudgeDismissBtn" class="nudge-dismiss" title="Dismiss">×</button>
 </div>
 
-<div id="accountPanel" class="layer-above" style="display:none;margin:10px 0;padding:12px;border:1px solid #334155;border-radius:10px;background:#0b1220;color:#e2e8f0;font-size:.85rem">
-  <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
-    <button id="accountClose" class="refresh-link" style="font-size:.7rem">close</button>
-  </div>
-  <div style="display:grid;gap:6px">
-    <!-- Account section dynamically inserted here by account_ui.js -->
+<!-- Account Modal -->
+<div id="accountModal" class="modal-overlay" style="display:none;">
+  <div class="modal-backdrop"></div>
+  <div class="modal account-modal">
+    <button class="modal-close" id="accountModalClose" aria-label="Close">×</button>
+    <div id="accountModalContent"></div>
   </div>
 </div>
 
