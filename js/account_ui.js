@@ -17,6 +17,7 @@ import { ACCOUNT_STORAGE_KEY, PASSKEY_STORAGE_KEY, SEED_SHOWN_KEY } from './core
 import * as storageManager from './core/storage_manager.js';
 import { openOnrampWidget, isCoinbaseOnrampConfigured } from './core/coinbase_onramp.js';
 import { formatBalanceAsBooks, getBalanceStatus } from './core/balance_display.js';
+import { requestFaucetFunding, isEligibleForFaucet } from './core/faucet_client.js';
 
 // Global state
 let currentBalanceETH = null;
@@ -773,6 +774,58 @@ function showSuccessModal(displayName, isPasskey) {
     await completeSetup();
     setTimeout(() => handleViewSeed(), 100);
   };
+
+  // Trigger faucet funding for passkey accounts (async, non-blocking)
+  if (isPasskey) {
+    (async () => {
+      try {
+        // Check eligibility
+        const eligible = await isEligibleForFaucet();
+        if (!eligible) {
+          console.log('[Bookish:AccountUI] Not eligible for faucet funding');
+          return;
+        }
+
+        // Update modal message to show "Setting up your account..."
+        const infoDiv = document.querySelector('#accountModal .modal-content > div > div[style*="background:#1e3a5f"]');
+        if (infoDiv) {
+          infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">⏳ Setting up your account...</div>';
+        }
+
+        // Get wallet address
+        const address = await window.bookishWallet?.getAddress?.();
+        if (!address) {
+          console.warn('[Bookish:AccountUI] No wallet address available for faucet');
+          return;
+        }
+
+        // Request funding
+        const result = await requestFaucetFunding(address);
+
+        if (result.success) {
+          console.log('[Bookish:AccountUI] Faucet funding successful:', result.txHash);
+          // Update modal message
+          if (infoDiv) {
+            infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">✓ Account ready! You can save your first books.</div>';
+          }
+          // Balance will be detected by sync_manager, triggering auto-persist
+        } else if (result.code === 'already-funded') {
+          // Silent - they already got funded somehow
+          console.log('[Bookish:AccountUI] Wallet already funded');
+        } else {
+          // Faucet failed - show manual funding option (silent fallback)
+          console.warn('[Bookish:AccountUI] Faucet funding failed:', result.error);
+          // Restore original message
+          if (infoDiv) {
+            infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">💡 Right now, your account only exists on this device. <strong>Add funds</strong> to make it permanent and accessible anywhere.</div>';
+          }
+        }
+      } catch (err) {
+        console.error('[Bookish:AccountUI] Faucet request error:', err);
+        // Silent failure - user can fund manually
+      }
+    })();
+  }
 }
 
 /**

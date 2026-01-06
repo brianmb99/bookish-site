@@ -4,12 +4,21 @@
 /**
  * Coinbase Onramp configuration
  * Base mainnet (chainId: 8453) for Base ETH purchases
+ *
+ * Always uses Cloudflare Worker for session token generation.
+ * For local development, use `wrangler dev` in the coinbase-onramp directory.
  */
+// Cloudflare Worker URL for Coinbase Onramp session token generation
+const COINBASE_WORKER_URL = 'https://bookish-coinbase-onramp.bookish.workers.dev';
+// Or use custom domain (when configured):
+// const COINBASE_WORKER_URL = 'https://onramp.getbookish.app';
+
 const COINBASE_CONFIG = {
   chainId: 8453,
   chainName: 'Base',
   ONRAMP_URL_BASE: 'https://pay.coinbase.com/buy/select-asset',
-  SESSION_TOKEN_ENDPOINT: '/api/coinbase/session-token'
+  // Always use Cloudflare Worker (works for both local dev and production)
+  SESSION_TOKEN_ENDPOINT: `${COINBASE_WORKER_URL}/api/coinbase/session-token`
 };
 
 /**
