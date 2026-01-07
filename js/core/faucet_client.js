@@ -1,9 +1,9 @@
 // faucet_client.js - Request initial funding from Bookish faucet
 
-// TODO: Update this URL after deploying the Cloudflare Worker
-// For initial deployment, use: https://bookish-faucet.YOUR_SUBDOMAIN.workers.dev/fund
+// Faucet Worker URL - deployed to Cloudflare Workers
+// Production: https://bookish-faucet.bookish.workers.dev/fund
 // For custom domain: https://faucet.getbookish.app/fund
-const FAUCET_URL = 'https://bookish-faucet.YOUR_SUBDOMAIN.workers.dev/fund';
+const FAUCET_URL = 'https://bookish-faucet.bookish.workers.dev/fund';
 
 /**
  * Request funding from the Bookish faucet
