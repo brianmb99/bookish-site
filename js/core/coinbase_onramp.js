@@ -10,8 +10,6 @@
  */
 // Cloudflare Worker URL for Coinbase Onramp session token generation
 const COINBASE_WORKER_URL = 'https://bookish-coinbase-onramp.bookish.workers.dev';
-// Or use custom domain (when configured):
-// const COINBASE_WORKER_URL = 'https://onramp.getbookish.app';
 
 const COINBASE_CONFIG = {
   chainId: 8453,

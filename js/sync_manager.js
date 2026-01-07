@@ -201,6 +201,16 @@ async function checkBalanceAndAutoPersist() {
 
       console.log('[Bookish:SyncManager] Just funded, account state:', accountState);
 
+      // Update progress modal to "waiting" state (mark step 2 as complete)
+      try {
+        if (window.__updateFundingProgress) {
+          window.__updateFundingProgress('waiting');
+        }
+      } catch (error) {
+        console.error('[Bookish:SyncManager] Failed to update progress modal:', error);
+        // Continue with persistence anyway
+      }
+
       if (accountState === 'local') {
         console.log('[Bookish:SyncManager] Wallet funded, triggering auto-persistence...');
         autoPersistenceTriggered = true;

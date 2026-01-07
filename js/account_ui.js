@@ -1917,8 +1917,19 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
     }
 
     // Phase 3: Update progress to "setting-up" state
-    if (window.__updateFundingProgress) {
-      window.__updateFundingProgress('setting-up');
+    // First ensure step 2 is marked complete, then update to "setting-up"
+    try {
+      if (window.__updateFundingProgress) {
+        // First ensure step 2 is marked complete
+        if (window.__fundingProgressState !== 'waiting' && window.__fundingProgressState !== 'setting-up') {
+          window.__updateFundingProgress('waiting');
+        }
+        // Then update to "setting-up"
+        window.__updateFundingProgress('setting-up');
+      }
+    } catch (error) {
+      console.error('[Bookish:AccountUI] Failed to update progress modal:', error);
+      // Continue with persistence completion anyway
     }
     localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accountObj));
 
