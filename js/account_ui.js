@@ -576,7 +576,7 @@ async function showSecuritySetupModal(seed, address, displayName) {
       closeAccountModal();
       // Use requestAnimationFrame to ensure close completes before showing new modal
       requestAnimationFrame(() => {
-        showSuccessModal(account.displayName, true);
+        showSuccessModal(account.displayName, true, credentialId);
       });
 
     } catch (error) {
@@ -716,7 +716,7 @@ function showManualBackupModal(seed, displayName) {
  * @param {string} displayName - User's display name
  * @param {boolean} isPasskey - Whether account is passkey-protected
  */
-function showSuccessModal(displayName, isPasskey) {
+function showSuccessModal(displayName, isPasskey, credentialId = null) {
   const protectionMessage = isPasskey
     ? 'Your account is protected by passkey.'
     : 'Your account is secured with your recovery phrase. Keep it safe!';
@@ -799,8 +799,8 @@ function showSuccessModal(displayName, isPasskey) {
           return;
         }
 
-        // Request funding
-        const result = await requestFaucetFunding(address);
+        // Request funding (pass credentialId to avoid second passkey dialog)
+        const result = await requestFaucetFunding(address, credentialId);
 
         if (result.success) {
           console.log('[Bookish:AccountUI] Faucet funding successful:', result.txHash);
