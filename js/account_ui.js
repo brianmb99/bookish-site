@@ -27,7 +27,10 @@ const transientState = {
   justSignedIn: false,
   signInTime: 0,
   justCreated: false,
-  createdTime: 0
+  createdTime: 0,
+  faucetResult: null, // 'funded', 'failed', 'skipped', or null
+  faucetTxHash: null,
+  faucetSkipped: false
 };
 
 const BANNER_DISMISSED_KEY = 'bookish_account_banner_dismissed';
@@ -421,9 +424,25 @@ function showAccountBannerIfNeeded() {
     <button class="account-banner-dismiss" id="dismissBannerBtn" aria-label="Dismiss">×</button>
   `;
 
-  document.getElementById('dismissBannerBtn').addEventListener('click', () => {
+  document.getElementById('dismissBannerBtn').addEventListener('click', (e) => {
+    e.stopPropagation(); // Prevent triggering banner click
     localStorage.setItem(BANNER_DISMISSED_KEY, 'true');
     banner.style.display = 'none';
+  });
+
+  // Add click handler to banner itself
+  banner.addEventListener('click', (e) => {
+    // Don't trigger if clicking dismiss button
+    if (e.target.closest('.account-banner-dismiss')) return;
+    openAccountModal();
+  });
+
+  // Keyboard support
+  banner.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openAccountModal();
+    }
   });
 }
 
@@ -572,11 +591,16 @@ async function showSecuritySetupModal(seed, address, displayName) {
       // Clean up temp
       delete window.__tempAccount;
 
-      // Ensure modal is closed before showing success
+      // Reset faucet state
+      transientState.faucetResult = null;
+      transientState.faucetTxHash = null;
+      transientState.faucetSkipped = false;
+
+      // Ensure modal is closed before showing loading state
       closeAccountModal();
       // Use requestAnimationFrame to ensure close completes before showing new modal
       requestAnimationFrame(() => {
-        showSuccessModal(account.displayName, true, credentialId);
+        onAccountCreated(account.displayName, true, credentialId);
       });
 
     } catch (error) {
@@ -712,36 +736,160 @@ function showManualBackupModal(seed, displayName) {
 }
 
 /**
+ * Handle account creation completion - shows loading state, runs faucet, then shows success modal
+ * @param {string} displayName - User's display name
+ * @param {boolean} isPasskey - Whether account is passkey-protected
+ * @param {string} credentialId - Passkey credential ID (if passkey account)
+ */
+async function onAccountCreated(displayName, isPasskey, credentialId = null) {
+  // For passkey accounts, show loading state and run faucet
+  if (isPasskey) {
+    // Show interim loading state with skip option
+    showAccountModal(`
+      <div style="text-align:center;padding:20px 0;">
+        <div style="font-size:3rem;margin-bottom:16px;opacity:.9;">⏳</div>
+        <h3 style="margin:0 0 16px 0;">Setting up your account...</h3>
+        <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;margin:0 0 24px 0;text-align:left;">
+          <div class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;color:#10b981;">
+            <span>✓</span> <span>Account created</span>
+          </div>
+          <div class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;color:#10b981;">
+            <span>✓</span> <span>Passkey enrolled</span>
+          </div>
+          <div id="setupStep3" class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;">
+            <span>◐</span> <span>Activating cloud storage...</span>
+          </div>
+        </div>
+        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 16px 0;">
+          This usually takes just a moment.
+        </p>
+        <button id="skipFaucetWaitBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;text-decoration:underline;">Skip this step →</button>
+      </div>
+    `);
+
+    // Skip button handler
+    document.getElementById('skipFaucetWaitBtn').onclick = () => {
+      transientState.faucetSkipped = true;
+      transientState.faucetResult = 'skipped';
+      showSuccessModal(displayName, isPasskey, credentialId);
+    };
+
+    // Run faucet with 15-second timeout
+    const eligible = await isEligibleForFaucet();
+    if (eligible && !transientState.faucetSkipped) {
+      try {
+        // Get wallet address
+        const address = await window.bookishWallet?.getAddress?.();
+        if (address) {
+          // Race between faucet request and timeout
+          const result = await Promise.race([
+            requestFaucetFunding(address, credentialId),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
+          ]);
+          transientState.faucetResult = result.success ? 'funded' : (result.code || 'failed');
+          transientState.faucetTxHash = result.txHash || null;
+        } else {
+          transientState.faucetResult = 'failed';
+        }
+      } catch (e) {
+        console.error('[Bookish:AccountUI] Faucet request error:', e);
+        transientState.faucetResult = e.message === 'timeout' ? 'timeout' : 'failed';
+      }
+    } else {
+      transientState.faucetResult = 'failed'; // Not eligible
+    }
+  } else {
+    // Manual accounts: no faucet, just show success modal
+    transientState.faucetResult = null;
+  }
+
+  // Now show final success modal
+  showSuccessModal(displayName, isPasskey, credentialId);
+}
+
+/**
  * Show success modal after account creation
  * @param {string} displayName - User's display name
  * @param {boolean} isPasskey - Whether account is passkey-protected
+ * @param {string} credentialId - Passkey credential ID (if passkey account)
  */
-function showSuccessModal(displayName, isPasskey, credentialId = null) {
+async function showSuccessModal(displayName, isPasskey, credentialId = null) {
   const protectionMessage = isPasskey
     ? 'Your account is protected by passkey.'
     : 'Your account is secured with your recovery phrase. Keep it safe!';
 
-  showAccountModal(`
-    <div style="text-align:center;padding:20px 0;">
-      <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;">✓</div>
-      <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
-      <p style="font-size:.85rem;line-height:1.6;opacity:.8;margin:0 0 16px 0;">
-        ${protectionMessage}
-      </p>
-      <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;text-align:left;">
-        <div style="font-size:.85rem;line-height:1.5;">
-          💡 Right now, your account only exists on this device. <strong>Add funds</strong> to make it permanent and accessible anywhere.
+  // Check if account is funded (either via faucet or existing balance)
+  const faucetOK = transientState.faucetResult === 'funded' || transientState.faucetResult === 'already-funded' || transientState.faucetResult === 'has-balance';
+  let balance = 0;
+  let isFunded = faucetOK;
+
+  // Check current balance if not already funded via faucet
+  if (!isFunded) {
+    try {
+      const address = await window.bookishWallet?.getAddress?.();
+      if (address) {
+        const balanceResult = await getWalletBalance(address);
+        balance = parseFloat(balanceResult.balanceETH || '0');
+        isFunded = balance >= 0.00002; // MIN_FUNDING_ETH
+      }
+    } catch (e) {
+      console.error('[Bookish:AccountUI] Error checking balance:', e);
+    }
+  }
+
+  // Render content based on funding status
+  let contentHTML;
+  if (isFunded) {
+    // State A: Faucet succeeded or already funded
+    contentHTML = `
+      <div style="text-align:center;padding:20px 0;">
+        <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;">✓</div>
+        <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
+        <p style="font-size:.85rem;line-height:1.6;opacity:.8;margin:0 0 16px 0;">
+          ${protectionMessage}
+        </p>
+        <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;text-align:left;">
+          <div style="font-size:.85rem;line-height:1.5;margin-bottom:4px;">
+            ✓ Cloud backup enabled
+          </div>
+          <div style="font-size:.75rem;opacity:.8;line-height:1.4;margin-bottom:4px;">
+            Your books will sync across devices.
+          </div>
+          ${faucetOK ? '<div style="font-size:.75rem;opacity:.8;line-height:1.4;">You have credit for ~30 books.</div>' : ''}
+        </div>
+        <button id="startAddingBooksBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Start Adding Books →</button>
+        <div style="margin-top:16px;">
+          <button id="viewRecoveryLinkBtn" class="btn-link" style="background:none;border:none;color:#64748b;font-size:.75rem;cursor:pointer;text-decoration:underline;">View recovery phrase in settings</button>
         </div>
       </div>
-      <button id="addFundsNowBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Enable Cloud Backup →</button>
-      <div style="margin-top:12px;">
-        <button id="skipForNowBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Skip for now</button>
+    `;
+  } else {
+    // State B: Faucet failed or skipped
+    contentHTML = `
+      <div style="text-align:center;padding:20px 0;">
+        <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;">✓</div>
+        <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
+        <p style="font-size:.85rem;line-height:1.6;opacity:.8;margin:0 0 16px 0;">
+          ${protectionMessage}
+        </p>
+        <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;text-align:left;">
+          <div style="font-size:.85rem;line-height:1.5;">
+            💡 Your account is local-only right now.<br>
+            <span style="font-size:.75rem;opacity:.8;">Add funds to enable cloud backup and sync.</span>
+          </div>
+        </div>
+        <button id="addFundsNowBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Enable Cloud Backup →</button>
+        <div style="margin-top:12px;">
+          <button id="skipForNowBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Skip for now</button>
+        </div>
+        <div style="margin-top:16px;">
+          <button id="viewRecoveryLinkBtn" class="btn-link" style="background:none;border:none;color:#64748b;font-size:.75rem;cursor:pointer;text-decoration:underline;">View recovery phrase in settings</button>
+        </div>
       </div>
-      <div style="margin-top:16px;">
-        <button id="viewRecoveryLinkBtn" class="btn-link" style="background:none;border:none;color:#64748b;font-size:.75rem;cursor:pointer;text-decoration:underline;">View recovery phrase in settings</button>
-      </div>
-    </div>
-  `);
+    `;
+  }
+
+  showAccountModal(contentHTML);
 
   // Set transient state for UI updates
   transientState.justCreated = true;
@@ -759,73 +907,27 @@ function showSuccessModal(displayName, isPasskey, credentialId = null) {
     startSync();
   };
 
-  // Add Funds Now - opens Coinbase onramp
-  document.getElementById('addFundsNowBtn').onclick = async () => {
-    await completeSetup();
-    // Small delay to let UI settle, then open funding
-    setTimeout(() => handleBuyStorage(), 100);
-  };
+  // Button handlers - conditional based on funding status
+  if (isFunded) {
+    // Start Adding Books button (funded state)
+    document.getElementById('startAddingBooksBtn').onclick = completeSetup;
+  } else {
+    // Add Funds Now - opens Coinbase onramp (unfunded state)
+    document.getElementById('addFundsNowBtn').onclick = async () => {
+      await completeSetup();
+      // Small delay to let UI settle, then open funding
+      setTimeout(() => handleBuyStorage(), 100);
+    };
 
-  // Skip for now - just closes and continues
-  document.getElementById('skipForNowBtn').onclick = completeSetup;
+    // Skip for now - just closes and continues (unfunded state)
+    document.getElementById('skipForNowBtn').onclick = completeSetup;
+  }
 
-  // View recovery phrase link
+  // View recovery phrase link (always available)
   document.getElementById('viewRecoveryLinkBtn').onclick = async () => {
     await completeSetup();
     setTimeout(() => handleViewSeed(), 100);
   };
-
-  // Trigger faucet funding for passkey accounts (async, non-blocking)
-  if (isPasskey) {
-    (async () => {
-      try {
-        // Check eligibility
-        const eligible = await isEligibleForFaucet();
-        if (!eligible) {
-          console.log('[Bookish:AccountUI] Not eligible for faucet funding');
-          return;
-        }
-
-        // Update modal message to show "Setting up your account..."
-        const infoDiv = document.querySelector('#accountModal .modal-content > div > div[style*="background:#1e3a5f"]');
-        if (infoDiv) {
-          infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">⏳ Setting up your account...</div>';
-        }
-
-        // Get wallet address
-        const address = await window.bookishWallet?.getAddress?.();
-        if (!address) {
-          console.warn('[Bookish:AccountUI] No wallet address available for faucet');
-          return;
-        }
-
-        // Request funding (pass credentialId to avoid second passkey dialog)
-        const result = await requestFaucetFunding(address, credentialId);
-
-        if (result.success) {
-          console.log('[Bookish:AccountUI] Faucet funding successful:', result.txHash);
-          // Update modal message
-          if (infoDiv) {
-            infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">✓ Account ready! You can save your first books.</div>';
-          }
-          // Balance will be detected by sync_manager, triggering auto-persist
-        } else if (result.code === 'already-funded') {
-          // Silent - they already got funded somehow
-          console.log('[Bookish:AccountUI] Wallet already funded');
-        } else {
-          // Faucet failed - show manual funding option (silent fallback)
-          console.warn('[Bookish:AccountUI] Faucet funding failed:', result.error);
-          // Restore original message
-          if (infoDiv) {
-            infoDiv.innerHTML = '<div style="font-size:.85rem;line-height:1.5;">💡 Right now, your account only exists on this device. <strong>Add funds</strong> to make it permanent and accessible anywhere.</div>';
-          }
-        }
-      } catch (err) {
-        console.error('[Bookish:AccountUI] Faucet request error:', err);
-        // Silent failure - user can fund manually
-      }
-    })();
-  }
 }
 
 /**

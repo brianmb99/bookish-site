@@ -244,7 +244,7 @@ button.secondary:hover, .btn.secondary:hover{
   font-size:1rem;
   color:var(--color-text-secondary);
   margin:0 0 32px 0;
-  max-width:320px;
+  max-width:260px;
   line-height:1.6;
 }
 .empty-cta{
@@ -284,6 +284,15 @@ button.secondary:hover, .btn.secondary:hover{
   font-size:0.875rem;
   color:#e2e8f0;
   animation:fadeIn .3s ease-out;
+  cursor:pointer;
+}
+.account-banner:hover{
+  background:linear-gradient(135deg, #253a5f 0%, #242b35 100%);
+  border-color:rgba(37,99,235,0.4);
+}
+.account-banner:focus-visible{
+  outline:2px solid var(--color-primary);
+  outline-offset:2px;
 }
 .account-banner-content{
   display:flex;
