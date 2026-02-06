@@ -225,7 +225,6 @@ let openAccountModal;
           console.error('[Bookish] openAccountModal is not defined');
         }
       };
-      btn.addEventListener('click', clickHandler);
       btn.onclick = clickHandler;
       console.log('[Bookish] Account button wired up successfully');
     } else {
@@ -234,7 +233,6 @@ let openAccountModal;
       setTimeout(() => {
         const retryBtn = document.getElementById('accountBtn');
         if (retryBtn && openAccountModal) {
-          retryBtn.addEventListener('click', () => openAccountModal());
           retryBtn.onclick = () => openAccountModal();
           console.log('[Bookish] Account button wired up on retry');
         } else {
@@ -589,7 +587,8 @@ async function createServerless(payload){ if(window.bookishCache){ const dup=awa
     // Ensure browser client is initialized
     const haveKeys = await ensureKeys();
     if (!haveKeys) {
-      throw new Error('Cannot upload: encryption keys not available');
+      // Not logged in — book saved locally, upload deferred until account exists
+      return;
     }
 
     // Ensure hidden EVM wallet exists before upload

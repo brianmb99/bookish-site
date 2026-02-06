@@ -2283,9 +2283,4 @@ window.accountUI = {
   updateBalanceDisplay
 };
 
-// Auto-initialize on page load
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initAccountUI);
-} else {
-  initAccountUI();
-}
+// Note: initAccountUI() is called from app.js — no auto-init here to avoid double initialization
