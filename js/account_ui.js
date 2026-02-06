@@ -912,6 +912,7 @@ async function showSuccessModal(displayName, isPasskey, credentialId = null) {
 
   // Helper to complete setup and start sync
   const completeSetup = async () => {
+    closeHelperModal();
     closeAccountModal();
     // Hide banner after account creation
     const banner = document.getElementById('accountBanner');
