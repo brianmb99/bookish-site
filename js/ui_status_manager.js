@@ -213,6 +213,12 @@ class UIStatusManager {
       const statusEl = document.getElementById('status');
       if (statusEl) {
         statusEl.textContent = message;
+        // Add warning class for warning messages
+        if (priority === PRIORITY.WARNING) {
+          statusEl.classList.add('warning');
+        } else {
+          statusEl.classList.remove('warning');
+        }
       }
 
       // Clear any pending auto-recalc

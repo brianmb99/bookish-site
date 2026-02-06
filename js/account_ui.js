@@ -235,7 +235,7 @@ async function renderAccountModalContent(container) {
           <div class="account-address-row" style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
             <span style="font-size: 0.8rem; color: #64748b;">Address:</span>
             <span class="account-address" style="font-family: var(--font-mono); font-size: 0.8rem; color: #94a3b8;">${shortAddress}</span>
-            <button id="copyAddressBtn" class="btn-icon" style="background: transparent; border: 1px solid #334155; color: #94a3b8; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;" title="Copy address">
+            <button id="copyAddressBtn" class="btn-icon copy-btn" style="background: transparent; border: 1px solid #334155; color: #94a3b8; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;" title="Copy address">
               📋 Copy
             </button>
           </div>
@@ -1604,7 +1604,7 @@ function showFundingValueModal(address, isFunded = false) {
         <div style="font-size:.8rem;opacity:.9;margin-bottom:8px;">Send Base ETH to this address:</div>
         <div style="background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;">
           <code style="font-size:.75rem;word-break:break-all;flex:1;">${address}</code>
-          <button id="copyAddressBtn" class="btn secondary" style="margin-left:8px;padding:4px 8px;font-size:.7rem;">Copy</button>
+          <button id="copyAddressBtn" class="btn secondary copy-btn" style="margin-left:8px;padding:4px 8px;font-size:.7rem;">Copy</button>
         </div>
         <div style="font-size:.75rem;opacity:.8;margin-top:8px;line-height:1.5;">
           <div>Minimum: 0.00003 ETH (~$0.10)</div>

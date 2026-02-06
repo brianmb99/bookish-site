@@ -71,7 +71,7 @@ function getBalanceStatus() {
 }
 
 // --- Utility / ordering ---
-function setStatus(m){ statusEl.textContent=m; if(window.BOOKISH_DEBUG) console.debug('[Bookish] status:', m); }
+function setStatus(m){ statusEl.textContent=m; statusEl.classList.remove('warning'); if(window.BOOKISH_DEBUG) console.debug('[Bookish] status:', m); }
 function orderEntries(){ entries.sort((a,b)=>{ const da=a.dateRead||''; const db=b.dateRead||''; if(da!==db) return db.localeCompare(da); if(a._committed!==b._committed) return a._committed?-1:1; return 0; }); }
 function formatDisplayDate(iso){ if(!iso) return ''; const d=new Date(iso+'T00:00:00Z'); if(isNaN(d)) return iso; return d.toLocaleDateString(undefined,{month:'short',year:'numeric'}); }
 
