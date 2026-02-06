@@ -314,8 +314,8 @@ function render(){
     const dotTitle = (!e.txid) ? 'Local only - not uploaded' : (e.onArweave ? 'Permanent on Arweave' : 'On Irys - settling to Arweave...');
     const dateDisp=formatDisplayDate(e.dateRead);
     div.innerHTML=`
-      <div class="status-dot ${dotClass}" title="${dotTitle}"></div>
-      <div class="cover">${e.coverImage?`<img src="data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}">`:'<span style="font-size:.55rem;opacity:.4">NO COVER</span>'}</div>
+      <div class="status-dot ${dotClass}" data-tip="${dotTitle}"></div>
+      <div class="cover">${e.coverImage?`<img src="data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}">`:'<span class="no-cover-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>'}</div>
       <div class="meta">
         <p class="title">${e.title||'<i>Untitled</i>'}</p>
         <p class="author">${e.author||''}</p>
@@ -345,15 +345,15 @@ async function updateBookDots(){
     if(!e.txid) {
       // Local only - not uploaded
       dot.classList.add('local');
-      dot.title = 'Local only - not uploaded';
+      dot.dataset.tip = 'Local only - not uploaded';
     } else if(e.onArweave) {
       // Final state - on Arweave, stop checking
       dot.classList.add('arweave');
-      dot.title = 'Permanent on Arweave';
+      dot.dataset.tip = 'Permanent on Arweave';
     } else {
       // On Irys - check if reached Arweave
       dot.classList.add('irys');
-      dot.title = 'On Irys - settling to Arweave...';
+      dot.dataset.tip = 'On Irys - settling to Arweave...';
 
       // Probe in background (only for entries needing it)
       probeAndUpdateDot(e, dot);
@@ -376,7 +376,7 @@ async function probeAndUpdateDot(entry, dot) {
       // Update dot immediately
       dot.classList.remove('irys');
       dot.classList.add('arweave');
-      dot.title = 'Permanent on Arweave';
+      dot.dataset.tip = 'Permanent on Arweave';
     }
   } catch(err) {
     // Probe failed - will retry on next update
