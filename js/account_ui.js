@@ -249,7 +249,10 @@ async function renderAccountModalContent(container) {
       </div>
 
       <div class="account-actions" style="margin-top: 24px;">
-        ${!isBackedUp ? `<button id="enableBackupBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">Enable Cloud Backup</button>` : ''}
+        ${!isBackedUp ? (() => {
+          const buttonText = isFunded ? 'Add Credit' : 'Enable Cloud Backup';
+          return `<button id="enableBackupBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">${buttonText}</button>`;
+        })() : ''}
         ${!isProtected ? `<button id="protectPasskeyBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">Protect with Passkey</button>` : ''}
         <div style="display: flex; gap: 12px; margin-top: 12px;">
           <button id="logoutBtn" class="btn secondary" style="flex: 1;">Log Out</button>
@@ -774,17 +777,17 @@ async function onAccountCreated(displayName, isPasskey, credentialId = null) {
       showSuccessModal(displayName, isPasskey, credentialId);
     };
 
-    // Run faucet with 15-second timeout
+    // Run faucet with 20-second timeout (accounts for retries: 1s + 2s + 4s delays + request time)
     const eligible = await isEligibleForFaucet();
     if (eligible && !transientState.faucetSkipped) {
       try {
         // Get wallet address
         const address = await window.bookishWallet?.getAddress?.();
         if (address) {
-          // Race between faucet request and timeout
+          // Race between faucet request (with retries) and timeout
           const result = await Promise.race([
-            requestFaucetFunding(address, credentialId),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 15000))
+            requestFaucetFunding(address, credentialId, 3), // 3 retries
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 20000))
           ]);
           transientState.faucetResult = result.success ? 'funded' : (result.code || 'failed');
           transientState.faucetTxHash = result.txHash || null;
@@ -1551,29 +1554,47 @@ function handleBuyTransak() {
 /**
  * Phase 3: Show value explanation modal before payment
  * @param {string} address - Wallet address for funding
+ * @param {boolean} isFunded - Whether account already has credit
  */
-function showFundingValueModal(address) {
+function showFundingValueModal(address, isFunded = false) {
   let advancedExpanded = false;
+
+  // Adapt messaging based on funding status
+  const title = isFunded ? 'Add More Credit' : 'Make Your Books Permanent';
+  const icon = isFunded ? '💰 → ☁️' : '☁️ + 🔒 = ♾️';
+  const introText = isFunded
+    ? 'You have some credit, but need more to back up all your books.'
+    : 'Right now, your books only exist on this device. Enable cloud backup to:';
+  const costLabel = isFunded ? 'Recommended: ~$5' : 'One-time cost: ~$5';
+  const paymentPrompt = isFunded ? 'How would you like to add credit?' : 'How would you like to pay?';
 
   showAccountModal(`
     <div style="text-align:center;padding:20px 0;">
-      <h3 style="margin:0 0 16px 0;">Make Your Books Permanent</h3>
-      <div style="font-size:2.5rem;margin:16px 0;opacity:.9;">☁️ + 🔒 = ♾️</div>
+      <h3 style="margin:0 0 16px 0;">${title}</h3>
+      <div style="font-size:2.5rem;margin:16px 0;opacity:.9;">${icon}</div>
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;text-align:left;">
-        Right now, your books only exist on this device. Enable cloud backup to:
+        ${introText}
       </p>
+      ${!isFunded ? `
       <div style="text-align:left;margin:0 0 24px 0;">
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Access from any device</div>
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Never lose your reading history</div>
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Keep your data forever</div>
       </div>
+      ` : `
+      <div style="text-align:left;margin:0 0 24px 0;">
+        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Back up all your books</div>
+        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Keep them synced across devices</div>
+        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Ensure permanent storage</div>
+      </div>
+      `}
       <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;">
         <div style="font-size:.85rem;line-height:1.5;">
-          <strong>One-time cost: ~$5</strong><br>
+          <strong>${costLabel}</strong><br>
           <span style="opacity:.8;">(covers years of storage)</span>
         </div>
       </div>
-      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 16px 0;">How would you like to pay?</p>
+      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 16px 0;">${paymentPrompt}</p>
       <button id="payWithCoinbaseBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;margin-bottom:12px;">Pay with Coinbase</button>
       <button id="payWithCardBtn" class="btn secondary" style="width:100%;padding:12px 20px;margin-bottom:12px;opacity:.6;cursor:not-allowed;" disabled>Pay with Card (Coming Soon)</button>
       <div style="margin:16px 0;">
@@ -1793,8 +1814,21 @@ async function handleBuyStorage() {
       return;
     }
 
+    // Get current balance to determine if funded
+    let isFunded = false;
+    try {
+      const balanceResult = await getWalletBalance(walletInfo.address);
+      const balanceETH = balanceResult.balanceETH || '0';
+      const balance = parseFloat(balanceETH);
+      isFunded = balance >= 0.00002; // MIN_FUNDING_ETH
+    } catch (e) {
+      console.error('[Bookish:AccountUI] Error checking balance for dialog:', e);
+      // Default to unfunded if check fails
+      isFunded = false;
+    }
+
     // Phase 3: Show value explanation modal before payment
-    showFundingValueModal(walletInfo.address);
+    showFundingValueModal(walletInfo.address, isFunded);
 
   } catch (error) {
     console.error('[Bookish:AccountUI] Failed to open funding flow:', error);
