@@ -176,7 +176,7 @@ class UIStatusManager {
     // ═══════════════════════════════════════════════════════════════
     if (!account.isLoggedIn) {
       return {
-        message: 'Ready',
+        message: '',
         priority: PRIORITY.AMBIENT,
         maxDisplay: 0
       };

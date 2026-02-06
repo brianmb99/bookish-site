@@ -417,6 +417,13 @@ function showAccountBannerIfNeeded() {
     return;
   }
 
+  // Don't show if the nudge banner is already visible (avoid duplicates)
+  const nudgeBanner = document.getElementById('accountNudgeBanner');
+  if (nudgeBanner && nudgeBanner.style.display !== 'none') {
+    banner.style.display = 'none';
+    return;
+  }
+
   // Show banner
   banner.style.display = 'flex';
   banner.innerHTML = `
@@ -431,6 +438,10 @@ function showAccountBannerIfNeeded() {
     e.stopPropagation(); // Prevent triggering banner click
     localStorage.setItem(BANNER_DISMISSED_KEY, 'true');
     banner.style.display = 'none';
+    // Also suppress the nudge banner so it doesn't reappear
+    localStorage.setItem('bookish.accountNudgeDismissed', 'true');
+    const nudge = document.getElementById('accountNudgeBanner');
+    if (nudge) nudge.style.display = 'none';
   });
 
   // Add click handler to banner itself

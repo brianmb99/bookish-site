@@ -82,7 +82,7 @@ function openModal(entry){
   const inputs=[...form.querySelectorAll('input,select,textarea')];
   inputs.forEach(i=>{ if(i.name==='priorTxid') return; i.disabled=false; });
   // Populate fields
-  form.priorTxid.value=entry?entry.txid:'';
+  form.priorTxid.value=entry?(entry.txid||entry.id||''):'';
   form.title.value=entry?entry.title:'';
   form.author.value=entry?entry.author:'';
   form.edition.value=entry?entry.edition:'';
@@ -282,6 +282,10 @@ export function showAccountNudge(){
   // Only show if 3+ books
   if(entries.length < 3) return;
 
+  // Hide the other account banner to avoid duplicates
+  const otherBanner = document.getElementById('accountBanner');
+  if(otherBanner) otherBanner.style.display='none';
+
   if(accountNudgeBanner){
     accountNudgeBanner.style.display='flex';
   }
@@ -294,7 +298,7 @@ export function hideAccountNudge(){
 }
 
 // --- Render ---
-function markDeletingVisual(entry){ entry._deleting=true; entry._committed=false; const el=document.querySelector('.card[data-txid="'+entry.txid+'"]'); if(el){ el.classList.add('deleting'); el.style.pointerEvents='none'; el.style.opacity='0.35'; } }
+function markDeletingVisual(entry){ entry._deleting=true; entry._committed=false; const key=entry.txid||entry.id||''; const el=key?document.querySelector('.card[data-txid="'+key+'"]'):null; if(el){ el.classList.add('deleting'); el.style.pointerEvents='none'; el.style.opacity='0.35'; } }
 function render(){
   cardsEl.innerHTML='';
   if(!entries.length){ emptyEl.style.display='block'; hideAccountNudge(); return; } else emptyEl.style.display='none';
@@ -309,7 +313,7 @@ function render(){
     if(e.status==='tombstoned') continue;
     const div=document.createElement('div');
     const rawFmt=(e.format||'').toLowerCase(); let fmtVariant=rawFmt==='audiobook'?'audio':(rawFmt==='ebook'?'ebook':'print');
-    div.className='card'+(e._deleting?' deleting':''); div.dataset.txid=e.txid; div.dataset.fmt=fmtVariant; div.dataset.format=rawFmt;
+    div.className='card'+(e._deleting?' deleting':''); div.dataset.txid=e.txid||e.id||''; div.dataset.fmt=fmtVariant; div.dataset.format=rawFmt;
     const dotClass = (!e.txid) ? 'local' : (e.onArweave ? 'arweave' : 'irys');
     const dotTitle = (!e.txid) ? 'Local only - not uploaded' : (e.onArweave ? 'Permanent on Arweave' : 'On Irys - settling to Arweave...');
     const dateDisp=formatDisplayDate(e.dateRead);
@@ -334,7 +338,7 @@ function render(){
  */
 async function updateBookDots(){
   for(const e of entries){
-    const card = cardsEl.querySelector(`.card[data-txid="${e.txid}"]`);
+    const card = cardsEl.querySelector(`.card[data-txid="${e.txid||e.id||''}"]`);
     if(!card) continue;
     const dot = card.querySelector('.status-dot');
     if(!dot) continue;
@@ -427,7 +431,7 @@ async function ensureKeys(){
   if(keyState.loaded) return true;
   let symTxt=localStorage.getItem('bookish.sym');
   // Legacy hex key prompt removed - now using passkey-protected seed storage
-  if(!symTxt){ setStatus('Not logged in'); return false; }
+  if(!symTxt){ return false; }
   try { const sym=localStorage.getItem('bookish.sym'); if(window.createBrowserClient){ browserClient=await window.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } else if(window.bookishBrowserClient){ browserClient=await window.bookishBrowserClient.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } if(!browserClient){ setStatus('Client loading...'); return false; } keyState.loaded=true; const addr=await browserClient.address(); setStatus('EVM '+(addr?addr.slice(0,8)+'...':'ready')); return true; } catch(e){ console.error(e); setStatus('Key load error'); return false; }
 }
 
@@ -630,7 +634,7 @@ async function createServerless(payload){ if(window.bookishCache){ const dup=awa
     }
   }
 }
-async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.txid===priorTxid); if(!old) throw new Error('Entry not found'); const snapshot={...old}; Object.assign(old,payload); old.pending=true; old.status='pending'; old.seenRemote=false; old._committed=false; await window.bookishCache.putEntry(old); orderEntries(); render(); try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot upload: encryption keys not available'); payload.bookId=old.bookId; diagMaybeSet(['Saving via Irys\u2026']); const res=await browserClient.uploadEntry({ ...payload },{ extraTags:[{name:'Prev',value:priorTxid}] }); const oldTxid=priorTxid; old.txid=res.txid; old.id=res.txid; old.pending=false; old.status='confirmed'; old.seenRemote=true; await window.bookishCache.replaceProvisional(oldTxid,old); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); diagMaybeClear(); } catch(e){ if(e && e.code==='irys-required'){ // revert UI and prompt refresh
+async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.txid===priorTxid) || entries.find(e=>e.id===priorTxid); if(!old) throw new Error('Entry not found'); const snapshot={...old}; Object.assign(old,payload); old.pending=true; old.status='pending'; old.seenRemote=false; old._committed=false; await window.bookishCache.putEntry(old); orderEntries(); render(); if(!old.txid){ /* local-only entry — saved to cache, no upload needed */ return; } try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot upload: encryption keys not available'); payload.bookId=old.bookId; diagMaybeSet(['Saving via Irys\u2026']); const res=await browserClient.uploadEntry({ ...payload },{ extraTags:[{name:'Prev',value:priorTxid}] }); const oldTxid=priorTxid; old.txid=res.txid; old.id=res.txid; old.pending=false; old.status='confirmed'; old.seenRemote=true; await window.bookishCache.replaceProvisional(oldTxid,old); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); diagMaybeClear(); } catch(e){ if(e && e.code==='irys-required'){ // revert UI and prompt refresh
     Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
     const pending = { type:'edit', priorTxid, payload };
     lastPendingOp = pending;
@@ -649,7 +653,7 @@ async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.tx
     walletError='Auto-fund blocked: Base wallet low on ETH. Top up and retry from Account.'; uiStatusManager.refresh();
   diagMaybeSet(['Base wallet low on ETH','Add a small amount, then retry']);
   } else { Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render(); walletError='Save failed'; uiStatusManager.refresh(); diagMaybeSet(['Save failed']); } } }
-async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid); if(!entry) return; markDeletingVisual(entry); uiStatusManager.refresh(); try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot delete: encryption keys not available'); await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); } catch{ entry._deleting=false; render(); walletError='Delete failed'; uiStatusManager.refresh(); } }
+async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid) || entries.find(e=>e.id===priorTxid); if(!entry) return; markDeletingVisual(entry); uiStatusManager.refresh(); if(!entry.txid){ /* local-only entry — just remove from cache and entries */ if(window.bookishCache) await window.bookishCache.deleteById(entry.id); entries=entries.filter(e=>e!==entry); orderEntries(); render(); uiStatusManager.refresh(); return; } try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot delete: encryption keys not available'); await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); } catch{ entry._deleting=false; render(); walletError='Delete failed'; uiStatusManager.refresh(); } }
 
 // --- Form handlers ---
 form.addEventListener('submit',ev=>{ ev.preventDefault(); const priorTxid=form.priorTxid.value||undefined; const payload={ title:form.title.value.trim(), author:form.author.value.trim(), edition:form.edition.value.trim(), format:form.format.value, dateRead:form.dateRead.value }; if(coverPreview.dataset.b64){ payload.coverImage=coverPreview.dataset.b64; if(coverPreview.dataset.mime) payload.mimeType=coverPreview.dataset.mime; } uiStatusManager.refresh(); if(priorTxid){ // immediate close, background edit
@@ -670,6 +674,10 @@ emptyAddBookBtn?.addEventListener('click', ()=>openModal(null));
 nudgeDismissBtn?.addEventListener('click', ()=>{
   hideAccountNudge();
   localStorage.setItem('bookish.accountNudgeDismissed', 'true');
+  // Also suppress the other account banner so it doesn't reappear
+  localStorage.setItem('bookish_account_banner_dismissed', 'true');
+  const otherBanner = document.getElementById('accountBanner');
+  if(otherBanner) otherBanner.style.display='none';
 });
 
 nudgeCreateAccountBtn?.addEventListener('click', ()=>{

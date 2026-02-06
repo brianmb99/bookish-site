@@ -80,8 +80,18 @@ header h1{
   -webkit-text-fill-color:transparent;
   background-clip:text;
 }
-#status{font-size:.65rem;opacity:.7;color:var(--color-text-muted)}
-#status.warning{color:var(--color-warning);opacity:.9}
+#status{
+  font-size:.65rem;
+  opacity:.7;
+  color:var(--color-text-muted);
+  transition:color .2s ease,opacity .2s ease;
+}
+#status:empty{display:none}
+#status.warning{
+  color:var(--color-warning);
+  opacity:1;
+  font-weight:500;
+}
 button, .btn{
   font-family:var(--font-body);
   font-weight:600;
@@ -128,6 +138,17 @@ button.secondary:hover, .btn.secondary:hover{
 .new-compact:hover{background:var(--color-bg-elevated)!important;border-color:var(--color-border-strong)!important}
 .refresh-link{background:transparent!important;color:#748090!important;padding:2px 4px!important;font-size:.6rem!important;border:none!important;cursor:pointer;text-decoration:underline transparent}
 .refresh-link:hover{color:#9aa5b1!important;text-decoration:underline}
+.account-link{
+  color:var(--color-text-secondary)!important;
+  font-weight:500!important;
+  text-decoration:none!important;
+  border-bottom:1px solid transparent!important;
+  padding-bottom:1px!important;
+}
+.account-link:hover{
+  color:var(--color-text-primary)!important;
+  border-bottom-color:var(--color-primary)!important;
+}
 .cards{display:flex;flex-direction:column;gap:14px;margin-top:8px}
 .card{
   position:relative;
