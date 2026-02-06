@@ -122,6 +122,49 @@ export function passesFilter(item, activeFilter) {
   return true;
 }
 
+// Deduplicate documents by display representation (title + author)
+// Removes visually identical results even if they have different work keys
+export function deduplicateByDisplay(docs) {
+  const seen = new Set();
+  return docs.filter(d => {
+    const title = (d.title || '').toLowerCase().trim();
+    const author = ((d.author_name && d.author_name[0]) || '').toLowerCase().trim();
+    const key = `${title}|${author}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// Detect if query is an ISBN (10 or 13 digits, with optional hyphens/spaces)
+// Returns { isISBN, isbn, isbnUrl } or { isISBN: false }
+export function detectISBN(query) {
+  const digits = query.replace(/[\s-]/g, '');
+  if (/^\d{10}$/.test(digits) || /^\d{13}$/.test(digits)) {
+    return {
+      isISBN: true,
+      isbn: digits,
+      isbnUrl: `https://openlibrary.org/isbn/${digits}.json`
+    };
+  }
+  return { isISBN: false };
+}
+
+// Parse "Title by Author" or natural language queries into components
+// Returns { title, author } where author may be null
+export function parseAuthorTitle(query) {
+  const trimmed = query.trim();
+  if (!trimmed) return { title: '', author: null };
+
+  // Pattern: "Title by Author" (case-insensitive, requires 2+ chars on each side)
+  const byMatch = trimmed.match(/^(.{2,}?)\s+by\s+(.{2,})$/i);
+  if (byMatch) {
+    return { title: byMatch[1].trim(), author: byMatch[2].trim() };
+  }
+
+  return { title: trimmed, author: null };
+}
+
 // Filter and sort combined results
 export function filterAndSort({
   olDocs,
