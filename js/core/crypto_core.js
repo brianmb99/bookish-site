@@ -246,61 +246,7 @@ export function clearSessionEncryptedSeed() {
   console.log('[Bookish:CryptoCore] Session-encrypted seed cleared');
 }
 
-/**
- * Store PRF encryption key in localStorage
- * Exports CryptoKey as JWK, stores as bookish.prfKey
- * Eliminates need for passkey re-authentication during session
- * @param {CryptoKey} prfKey - PRF-derived AES-GCM key
- * @returns {Promise<void>}
- */
-export async function storePRFKey(prfKey) {
-  try {
-    // Export key as JWK (JSON Web Key)
-    const jwk = await crypto.subtle.exportKey('jwk', prfKey);
-    localStorage.setItem('bookish.prfKey', JSON.stringify(jwk));
-    console.log('[Bookish:CryptoCore] PRF key cached');
-  } catch (error) {
-    console.error('[Bookish:CryptoCore] Failed to cache PRF key:', error);
-    throw error;
-  }
-}
-
-/**
- * Retrieve PRF encryption key from localStorage
- * Returns null if not available (user needs to authenticate)
- * @returns {Promise<CryptoKey|null>} - PRF encryption key or null
- */
-export async function getPRFKey() {
-  try {
-    const jwkStr = localStorage.getItem('bookish.prfKey');
-    if (!jwkStr) {
-      return null;
-    }
-
-    const jwk = JSON.parse(jwkStr);
-    const prfKey = await crypto.subtle.importKey(
-      'jwk',
-      jwk,
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt', 'decrypt']
-    );
-
-    return prfKey;
-  } catch (error) {
-    console.error('[Bookish:CryptoCore] Failed to retrieve PRF key:', error);
-    return null;
-  }
-}
-
-/**
- * Clear PRF key from localStorage
- * Called on logout
- */
-export function clearPRFKey() {
-  localStorage.removeItem('bookish.prfKey');
-  console.log('[Bookish:CryptoCore] PRF key cleared');
-}
+// PRF key functions removed — passkey no longer supported
 
 
 

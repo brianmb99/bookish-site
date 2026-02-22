@@ -171,6 +171,38 @@ async function upload(dataBytes, tags){
       if(price){ console.info('[Bookish:Irys] price', { priceWei: price.toString(), addr }); }
     }catch(preErr){ console.info('[Bookish:Irys] preflight-note', preErr?.code || preErr?.message || preErr); /* continue; node will enforce */ }
 
+    // --- Flat protocol fee (per-upload) ---
+    // Sent BEFORE the upload so it works regardless of whether Irys charges (402)
+    // or subsidises the upload. Fee failure never blocks the upload.
+    try {
+      const { PROTOCOL_CONFIG } = await import('./core/protocol_config.js');
+      if (PROTOCOL_CONFIG.FEE_ENABLED && PROTOCOL_CONFIG.FLAT_FEE_WEI) {
+        const { sendProtocolFee, logFeeEvent } = await import('./core/protocol_fee.js');
+        const flatFee = BigInt(PROTOCOL_CONFIG.FLAT_FEE_WEI);
+        logFeeEvent({ type: 'flat-fee-start', feeWei: flatFee.toString() });
+        console.info('[Bookish:Irys] sending protocol fee…', { feeWei: flatFee.toString() });
+
+        const feeSigner = await getSigner();
+        try {
+          const feeResult = await Promise.race([
+            sendProtocolFee(flatFee, feeSigner),
+            new Promise(resolve => setTimeout(() => resolve(null), 15000)),
+          ]);
+          if (feeResult?.txHash) {
+            logFeeEvent({ type: 'flat-fee-sent', txHash: feeResult.txHash });
+            console.info('[Bookish:Irys] protocol fee sent', { txHash: feeResult.txHash });
+          } else {
+            logFeeEvent({ type: 'flat-fee-skipped' });
+            console.info('[Bookish:Irys] protocol fee skipped (send failed or timed out)');
+          }
+        } catch {
+          logFeeEvent({ type: 'flat-fee-error' });
+        }
+      }
+    } catch (feeErr) {
+      console.warn('[Bookish:ProtocolFee] Fee module error (non-blocking):', feeErr?.message || feeErr);
+    }
+
     const dataItem = createData(bytes, ethSigner, { tags: dtTags });
     // Use web-safe signer to sign, which we also patched onto DataItem
     await bundleMod.sign(dataItem, ethSigner);
@@ -278,7 +310,10 @@ async function upload(dataBytes, tags){
       const amount = BigInt(decision.amountWei);
       logAppend('funding', 'decision-fund', { amountWei: amount.toString(), decision });
 
-      // Attempt single on-chain funding
+      // Protocol fee already collected before upload (flat per-upload fee).
+      // Irys receives the full funding amount so uploads don't fail.
+
+      // Attempt single on-chain funding (full amount)
       try{
         logAppend('funding', 'onchain-start', { amountWei: amount.toString(), identity });
         const res = await fundOnChain(amount.toString());

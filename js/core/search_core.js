@@ -105,6 +105,13 @@ export function scoreDocument({ title, subtitle, author, queryTokens, queryStrin
   return { score, coverage, strict };
 }
 
+// Filter documents by language (English-only)
+// Keeps: docs with no language info, docs that include English
+export function isEnglish(doc) {
+  if (!doc.language || !Array.isArray(doc.language) || doc.language.length === 0) return true;
+  return doc.language.some(l => l === 'eng' || l === 'en' || l === 'English');
+}
+
 // Filter documents by format
 export function passesFilter(item, activeFilter) {
   if (activeFilter === 'all') return true;
@@ -116,6 +123,7 @@ export function passesFilter(item, activeFilter) {
   // OpenLibrary format guess
   const fmt = (item.physical_format || '').toLowerCase();
   if (activeFilter === 'audiobook') return fmt.includes('audio');
+  if (activeFilter === 'ebook') return fmt.includes('ebook') || fmt.includes('e-book') || fmt.includes('electronic') || fmt.includes('kindle');
   if (activeFilter === 'paperback') return fmt.includes('paper');
   if (activeFilter === 'hardcover') return fmt.includes('hard');
 
@@ -181,6 +189,9 @@ export function filterAndSort({
     ol = ol.filter(d => d._strict);
     it = it.filter(i => i._strict);
   }
+
+  // Filter non-English results
+  ol = ol.filter(d => isEnglish(d));
 
   // Apply format filter
   ol = ol.filter(d => passesFilter(d, activeFilter));

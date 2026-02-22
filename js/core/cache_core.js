@@ -31,15 +31,34 @@ export async function detectDuplicate(payload, existingEntries) {
  * @param {Array<Object>} remoteList - Remote entries from server
  * @param {Array<Object>} tombstones - Array of {txid, ref} indicating deleted entries
  * @param {Array<Object>} localEntries - Current local entries
- * @returns {Promise<Object>} - { toAdd: [], toUpdate: [], toTombstone: [] }
+ * @returns {Promise<Object>} - { toAdd: [], toUpdate: [], toTombstone: [], toReplace: [] }
  */
 export async function applyRemote(remoteList, tombstones, localEntries) {
   const tombRefs = new Set((tombstones || []).map(t => t.ref).filter(Boolean));
   const localMapByTx = new Map(localEntries.filter(e => e.txid).map(e => [e.txid, e]));
+  // Index provisional/pending local entries by contentHash for create-race dedup
+  const localPendingByHash = new Map();
+  for (const e of localEntries) {
+    if (e.contentHash && e.status !== 'confirmed' && e.status !== 'tombstoned') {
+      localPendingByHash.set(e.contentHash, e);
+    }
+  }
+
+  // Index ALL local entries by bookId for edit-race dedup.
+  // When an edit uploads (new txid) and replaceProvisional deletes the old entry,
+  // a subsequent sync may re-discover the old txid on Arweave before the new one
+  // is indexed. Without bookId matching, the old entry gets re-added as "new".
+  const localByBookId = new Map();
+  for (const e of localEntries) {
+    if (e.bookId && e.status !== 'tombstoned') {
+      localByBookId.set(e.bookId, e);
+    }
+  }
 
   const toAdd = [];
   const toUpdate = [];
   const toTombstone = [];
+  const toReplace = [];
 
   // Process remote entries
   for (const r of remoteList) {
@@ -66,7 +85,10 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
         toUpdate.push({ ...existing, ...updates });
       }
     } else {
-      // New remote entry - compute content hash for it
+      // New remote entry not in local by txid
+      const prevTxid = r.prevTxid;
+      const supersededLocal = prevTxid ? localMapByTx.get(prevTxid) : null;
+
       const contentHash = await computeContentHash({
         title: r.title,
         author: r.author,
@@ -75,9 +97,10 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
         dateRead: r.dateRead
       });
 
-      toAdd.push({
+      const newEntry = {
         id: r.txid,
         txid: r.txid,
+        bookId: r.bookId || null,
         title: r.title,
         author: r.author,
         edition: r.edition,
@@ -85,12 +108,31 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
         dateRead: r.dateRead,
         coverImage: r.coverImage,
         mimeType: r.mimeType,
+        notes: r.notes || null,
         contentHash,
         createdAt: Date.now(),
         status: 'confirmed',
         seenRemote: true,
         onArweave: false
-      });
+      };
+
+      if (supersededLocal) {
+        // Edit race: sync saw new txid before replaceProvisional ran
+        toReplace.push({ prevId: supersededLocal.id, entry: newEntry });
+      } else {
+        // Create race: sync saw confirmed txid while local still has provisional "local-xxx"
+        const provisionalMatch = localPendingByHash.get(contentHash);
+        if (provisionalMatch) {
+          toReplace.push({ prevId: provisionalMatch.id, entry: newEntry });
+          localPendingByHash.delete(contentHash); // consume so we don't match twice
+        } else if (r.bookId && localByBookId.has(r.bookId)) {
+          // bookId match: local already has this book (likely a newer edit).
+          // The old Arweave txid reappeared before the new one was indexed.
+          // Skip — the local entry is authoritative.
+        } else {
+          toAdd.push(newEntry);
+        }
+      }
     }
   }
 
@@ -105,7 +147,7 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
     }
   }
 
-  return { toAdd, toUpdate, toTombstone };
+  return { toAdd, toUpdate, toTombstone, toReplace };
 }
 
 /**

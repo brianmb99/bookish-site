@@ -10,13 +10,17 @@ export const STORAGE_KEYS = {
   ACCOUNT: 'bookish.account',              // Account metadata (address, derivation, displayName, created, arweaveTxId)
   SYM_KEY: 'bookish.sym',                  // Symmetric encryption key (hex string)
   SESSION_SEED: 'bookish.account.sessionEnc', // Session-encrypted seed
-  MANUAL_SEED: 'bookish.seed.manual',      // Manual seed for non-passkey accounts
-  PASSKEY: 'bookish.passkey',              // Passkey credential info
+  MANUAL_SEED: 'bookish.seed.manual',      // Manual seed (legacy)
   SEED_SHOWN: 'bookish.seed.shown',        // Flag: seed phrase has been shown to user
-  PRF_KEY: 'bookish.prf.key',              // Cached PRF key for passkey accounts
 
   // Wallet
-  EVM_WALLET: 'bookish.evmWallet.v1'       // Encrypted EVM wallet (Base)
+  EVM_WALLET: 'bookish.evmWallet.v1',       // Encrypted EVM wallet (Base)
+
+  // Credential-based auth (email+password)
+  CREDENTIAL: 'bookish.credential',          // Credential metadata: {lookupKey, hasEscrow}
+
+  // Pending credential mapping (survives page reload until uploaded to Arweave)
+  PENDING_CREDENTIAL_MAPPING: 'bookish.credential.pending'  // Base64 encrypted payload + lookupKey
 };
 
 // ============================================================================
@@ -54,25 +58,11 @@ export function getSessionSeed() {
 }
 
 /**
- * Get manual seed (for non-passkey accounts)
+ * Get manual seed (legacy)
  * @returns {string|null} Seed string or null
  */
 export function getManualSeed() {
   return localStorage.getItem(STORAGE_KEYS.MANUAL_SEED);
-}
-
-/**
- * Get passkey credential info
- * @returns {Object|null} Parsed passkey object or null
- */
-export function getPasskeyInfo() {
-  try {
-    const data = localStorage.getItem(STORAGE_KEYS.PASSKEY);
-    return data ? JSON.parse(data) : null;
-  } catch (error) {
-    console.error('[StorageManager] Failed to parse passkey info:', error);
-    return null;
-  }
 }
 
 /**
@@ -90,11 +80,31 @@ export function getWalletRecord() {
 }
 
 /**
- * Get cached PRF key
- * @returns {string|null} PRF key or null
+ * Get credential metadata (email+password auth)
+ * @returns {Object|null} Parsed credential object or null
  */
-export function getPRFKey() {
-  return localStorage.getItem(STORAGE_KEYS.PRF_KEY);
+export function getCredential() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEYS.CREDENTIAL);
+    return data ? JSON.parse(data) : null;
+  } catch (error) {
+    console.error('[StorageManager] Failed to parse credential:', error);
+    return null;
+  }
+}
+
+/**
+ * Get pending credential mapping (awaiting Arweave upload)
+ * @returns {Object|null} Parsed pending mapping {lookupKey, encryptedPayloadB64} or null
+ */
+export function getPendingCredentialMapping() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEYS.PENDING_CREDENTIAL_MAPPING);
+    return data ? JSON.parse(data) : null;
+  } catch (error) {
+    console.error('[StorageManager] Failed to parse pending credential mapping:', error);
+    return null;
+  }
 }
 
 /**
@@ -154,17 +164,6 @@ export function setManualSeed(seed) {
 }
 
 /**
- * Set passkey credential info
- * @param {Object} info - Passkey info object
- */
-export function setPasskeyInfo(info) {
-  if (!info || typeof info !== 'object') {
-    throw new Error('Invalid passkey info');
-  }
-  localStorage.setItem(STORAGE_KEYS.PASSKEY, JSON.stringify(info));
-}
-
-/**
  * Set EVM wallet record
  * @param {Object} record - Wallet record object
  */
@@ -176,14 +175,26 @@ export function setWalletRecord(record) {
 }
 
 /**
- * Set cached PRF key
- * @param {string} key - PRF key
+ * Set credential metadata (email+password auth)
+ * @param {Object} credential - Credential object {lookupKey, hasEscrow}
  */
-export function setPRFKey(key) {
-  if (!key || typeof key !== 'string') {
-    throw new Error('Invalid PRF key');
+export function setCredential(credential) {
+  if (!credential || typeof credential !== 'object') {
+    throw new Error('Invalid credential data');
   }
-  localStorage.setItem(STORAGE_KEYS.PRF_KEY, key);
+  localStorage.setItem(STORAGE_KEYS.CREDENTIAL, JSON.stringify(credential));
+}
+
+/**
+ * Set pending credential mapping (awaiting Arweave upload)
+ * Persisted to localStorage so it survives page reloads before funding
+ * @param {Object} mapping - {lookupKey: string, encryptedPayloadB64: string}
+ */
+export function setPendingCredentialMapping(mapping) {
+  if (!mapping || typeof mapping !== 'object') {
+    throw new Error('Invalid pending credential mapping');
+  }
+  localStorage.setItem(STORAGE_KEYS.PENDING_CREDENTIAL_MAPPING, JSON.stringify(mapping));
 }
 
 /**
@@ -231,6 +242,22 @@ export function hasWallet() {
 }
 
 /**
+ * Check if credential metadata exists (email+password auth)
+ * @returns {boolean}
+ */
+export function hasCredential() {
+  return !!localStorage.getItem(STORAGE_KEYS.CREDENTIAL);
+}
+
+/**
+ * Check if pending credential mapping exists
+ * @returns {boolean}
+ */
+export function hasPendingCredentialMapping() {
+  return !!localStorage.getItem(STORAGE_KEYS.PENDING_CREDENTIAL_MAPPING);
+}
+
+/**
  * Check if user is logged in (has both account and sym key)
  * @returns {boolean}
  */
@@ -259,12 +286,11 @@ export function clearAccount() {
 }
 
 /**
- * Clear authentication data (sym key, session seed, PRF key)
+ * Clear authentication data (sym key, session seed)
  */
 export function clearAuth() {
   localStorage.removeItem(STORAGE_KEYS.SYM_KEY);
   localStorage.removeItem(STORAGE_KEYS.SESSION_SEED);
-  localStorage.removeItem(STORAGE_KEYS.PRF_KEY);
 }
 
 /**
@@ -275,17 +301,24 @@ export function clearWallet() {
 }
 
 /**
- * Clear passkey info
- */
-export function clearPasskey() {
-  localStorage.removeItem(STORAGE_KEYS.PASSKEY);
-}
-
-/**
  * Clear manual seed
  */
 export function clearManualSeed() {
   localStorage.removeItem(STORAGE_KEYS.MANUAL_SEED);
+}
+
+/**
+ * Clear credential metadata
+ */
+export function clearCredential() {
+  localStorage.removeItem(STORAGE_KEYS.CREDENTIAL);
+}
+
+/**
+ * Clear pending credential mapping (after successful upload)
+ */
+export function clearPendingCredentialMapping() {
+  localStorage.removeItem(STORAGE_KEYS.PENDING_CREDENTIAL_MAPPING);
 }
 
 /**
@@ -307,9 +340,10 @@ export function clearSession() {
   clearAuth();
   clearAccount();
   clearWallet();
-  clearPasskey();
   clearManualSeed();
   clearSeedShown();
+  clearCredential();
+  clearPendingCredentialMapping();
 }
 
 /**
@@ -336,9 +370,9 @@ export function getStorageState() {
     hasSymKey: hasSymKey(),
     hasSessionSeed: hasSessionSeed(),
     hasManualSeed: !!getManualSeed(),
-    hasPasskey: !!getPasskeyInfo(),
+    hasCredential: hasCredential(),
+    hasPendingCredentialMapping: hasPendingCredentialMapping(),
     hasWallet: hasWallet(),
-    hasPRFKey: !!getPRFKey(),
     seedShown: getSeedShown(),
     isLoggedIn: isLoggedIn(),
     isAccountPersisted: isAccountPersisted()
@@ -354,7 +388,6 @@ export function getSensitiveKeys() {
     STORAGE_KEYS.SYM_KEY,
     STORAGE_KEYS.SESSION_SEED,
     STORAGE_KEYS.MANUAL_SEED,
-    STORAGE_KEYS.PRF_KEY,
     STORAGE_KEYS.EVM_WALLET
   ];
 }

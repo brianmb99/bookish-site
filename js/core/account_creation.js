@@ -1,5 +1,5 @@
 // account_creation.js - Pure account creation (seed generation + wallet derivation)
-// No passkey, no Arweave, no UI - just core account generation logic
+// No Arweave, no UI - just core account generation logic
 
 import { generateMnemonic, validateMnemonic } from 'https://esm.sh/@scure/bip39@1.3.0';
 import { wordlist } from 'https://esm.sh/@scure/bip39@1.3.0/wordlists/english';

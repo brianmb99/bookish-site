@@ -16,18 +16,19 @@
   <div style="display:flex;align-items:center;gap:10px;font-size:.65rem">
     <div id="status" style="display:none"></div>
     <button id="installBtn" class="refresh-link" style="display:none" title="Install">Install</button>
+    <button id="syncNowBtn" class="refresh-link" title="Sync now" style="display:none">Sync</button>
     <button id="accountBtn" class="refresh-link account-link" title="Account">Account</button>
-    <button id="geekBtn" class="refresh-link" title="Network status" aria-controls="geekPanel">⚙︎</button>
+    <button id="geekBtn" class="refresh-link" title="Developer mode" aria-controls="geekPanel">⚙︎</button>
   </div>
 </header>
 <!-- status banner removed; status now shown inside geek panel -->
-<div id="geekPanel" class="layer-above" style="display:none;margin:10px 0;padding:8px;border:1px dashed #94a3b8;border-radius:8px;background:#0b1220;color:#e2e8f0;font-size:.75rem">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <strong>Arweave/Irys Status</strong>
-    <button id="geekClose" class="refresh-link" style="font-size:.7rem">close</button>
+<div id="geekPanel" class="geek-panel" style="display:none">
+  <div class="geek-header">
+    <span class="geek-title">Network</span>
+    <span id="geekBody" class="geek-stats"></span>
+    <button id="geekClose" class="geek-close" title="Turn off developer mode">&times;</button>
   </div>
-  <div id="geekBody">Reads: —</div>
-  <div id="geekStatusLine" style="opacity:.7;margin-top:4px;min-height:1.2em"></div>
+  <div id="geekStatusLine" class="geek-status-line"></div>
 </div>
 <div style="display:flex;gap:8px;margin:4px 0 12px">
   <button id="newBtn" class="new-compact" title="Add new">＋ New</button>
@@ -48,7 +49,7 @@
 <div id="accountModal" class="modal-overlay" style="display:none;">
   <div class="modal-backdrop"></div>
   <div class="modal account-modal">
-    <button class="modal-close" id="accountModalClose" aria-label="Close">×</button>
+    <button class="modal-close-btn" id="accountModalClose" aria-label="Close">×</button>
     <div id="accountModalContent"></div>
   </div>
 </div>
@@ -57,28 +58,43 @@
 <div id="empty" class="empty-state" style="display:none">
   <div class="empty-illustration">📚</div>
   <h2 class="empty-headline">Your reading journey starts here</h2>
-  <p class="empty-subtext">Your personal reading list — encrypted, permanent, and truly yours.</p>
+  <p class="empty-subtext">Track what you read. Keep it forever. Access it anywhere.</p>
   <button id="emptyAddBookBtn" class="btn primary empty-cta">Add Your First Book</button>
-  <p class="empty-hint">No sign-up needed. Start adding books right away.</p>
+  <div id="emptySignIn" class="empty-signin">Already have an account? <button class="link-btn" id="emptySignInBtn">Sign in</button></div>
 </div>
 <div id="celebrationToast" class="toast celebration-toast" style="display:none;">
   <span class="toast-icon">🎉</span>
   <span class="toast-message">First book added! You're on your way.</span>
 </div>
-<footer>Bookish • Alpha • v0.1.16</footer>
+<footer>Bookish • Alpha • v0.1.42</footer>
+</div>
+
+<!-- Notes expand overlay -->
+<div id="notesOverlay" class="notes-overlay" style="display:none;">
+  <div class="notes-overlay-backdrop"></div>
+  <div class="notes-overlay-inner">
+    <div class="notes-overlay-header">
+      <h3>Notes</h3>
+      <button type="button" id="notesOverlayClose" class="btn notes-overlay-done">Done</button>
+    </div>
+    <textarea id="notesOverlayInput" placeholder="Write your thoughts about this book..." maxlength="10000"></textarea>
+    <div class="notes-overlay-count"><span id="notesOverlayCount">0</span> / 10,000</div>
+  </div>
 </div>
 
 <div id="modal" class="modal">
   <div class="modal-inner">
-    <button class="close" id="closeModal">×</button>
+    <button class="modal-close-btn" id="closeModal" aria-label="Close">×</button>
     <div id="bookSearchUI">
       <h3>Lookup Book</h3>
       <input id="bookSearchInput" placeholder="Search title…" autocomplete="off"/>
+      <button type="button" id="filtersToggle" class="filters-toggle" style="display:none"><span class="filters-toggle-icon">▾</span> Filters<span id="filtersActiveIndicator" class="filters-active-dot" style="display:none"></span></button>
       <div id="searchControls" class="search-controls" style="display:none">
         <div class="filters">
           <span class="tiny-label">Filter:</span>
           <button type="button" class="filter-btn active" data-filter="all">All</button>
           <button type="button" class="filter-btn" data-filter="audiobook">Audio</button>
+          <button type="button" class="filter-btn" data-filter="ebook">Ebook</button>
           <button type="button" class="filter-btn" data-filter="paperback">Paperback</button>
           <button type="button" class="filter-btn" data-filter="hardcover">Hardcover</button>
         </div>
@@ -99,7 +115,9 @@
       <div class="form-as-tile">
         <div class="tile-cover" id="tileCoverClick">
           <img class="preview" id="coverPreview" style="display:none"/>
-          <div class="placeholder" id="coverPlaceholder">Click or search to add cover</div>
+          <div class="placeholder" id="coverPlaceholder"><div class="placeholder-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span>Click to upload cover</span></div></div>
+          <div class="cover-hover-hint" id="coverHoverHint">Click to change cover</div>
+          <button type="button" class="cover-remove-btn" id="coverRemoveBtn" title="Remove cover" style="display:none">×</button>
           <input type="file" name="coverFile" accept="image/*" style="display:none" id="hiddenCoverInput"/>
         </div>
         <div class="fields-cluster">
@@ -110,11 +128,18 @@
           <div class="field-block"><label>Date Read</label><div class="date-input-wrap"><input name="dateRead" type="date"><button type="button" class="cal-btn" id="openCalendarBtn" title="Pick date">📅</button></div></div>
         </div>
       </div>
+      <div class="notes-block">
+        <label class="notes-toggle" for="notesInput">
+          <span class="notes-toggle-icon">✎</span> Notes <span class="notes-hint">(optional)</span>
+        </label>
+        <textarea id="notesInput" name="notes" placeholder="Any thoughts about this book?" maxlength="10000" rows="3"></textarea>
+        <button type="button" class="notes-expand-btn" id="notesExpandBtn" title="Expand notes editor">⤢</button>
+      </div>
       <input type="hidden" name="priorTxid"/>
       <div class="row-actions primary-actions">
         <button type="submit" class="btn" id="saveBtn" disabled>Save</button>
-        <button type="button" class="btn secondary edit-only" id="cancelBtn">Cancel</button>
-        <button type="button" class="btn danger edit-only" id="deleteBtn" title="Soft delete (tombstone)">Delete</button>
+        <button type="button" class="btn secondary" id="cancelBtn">Cancel</button>
+        <button type="button" class="btn danger edit-only" id="deleteBtn" title="Delete book">Delete</button>
       </div>
     </form>
   </div>

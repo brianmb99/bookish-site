@@ -1,7 +1,7 @@
 {
   "$id": "https://your.repo/bookish/schemas/account-metadata-0.1.0.json",
   "title": "Bookish Account Metadata v0.1.0",
-  "description": "Encrypted account profile stored on Arweave, keyed by wallet address hash. Used by all account types (passkey and manual seed).",
+  "description": "Encrypted account profile stored on Arweave, keyed by wallet address hash.",
   "type": "object",
   "required": ["schema", "version", "encryptedData"],
   "properties": {

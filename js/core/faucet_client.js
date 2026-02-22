@@ -14,12 +14,13 @@ async function requestFaucetFundingOnce(walletAddress, existingCredentialId = nu
   const timestamp = Date.now();
   const challenge = `bookish-faucet:${walletAddress.toLowerCase()}:${timestamp}`;
 
-  // 2. Get credential ID - prefer passed-in value to avoid second passkey dialog
-  const { PASSKEY_STORAGE_KEY } = await import('./storage_constants.js');
-  const passkeyMeta = localStorage.getItem(PASSKEY_STORAGE_KEY);
-  const credentialId = existingCredentialId || (passkeyMeta ? JSON.parse(passkeyMeta).credentialId : null);
+  // 2. Get credential ID - prefer passed-in value, fall back to credential store
+  const { CREDENTIAL_STORAGE_KEY } = await import('./storage_constants.js');
+  const credentialData = localStorage.getItem(CREDENTIAL_STORAGE_KEY);
+  const credentialId = existingCredentialId
+    || (credentialData ? 'credential-auth' : null);
 
-  // 3. For alpha, we skip passkey signature to avoid double-auth UX issue
+  // 3. For alpha, we skip signature to simplify UX
   // Server-side protections (zero-balance check, IP rate limit, daily cap) are sufficient
   // The challenge still includes timestamp to prevent replay attacks
   const signature = `alpha-trusted:${credentialId || 'unknown'}`;
@@ -68,7 +69,7 @@ function isRetryableError(code, httpStatus) {
 
 /**
  * Request funding from the Bookish faucet with retry logic
- * Called immediately after passkey account creation
+ * Called immediately after account creation
  *
  * @param {string} walletAddress - User's wallet address
  * @param {string} [existingCredentialId] - Credential ID from account creation (avoids second auth)
@@ -131,47 +132,16 @@ export async function requestFaucetFunding(walletAddress, existingCredentialId =
 }
 
 /**
- * Sign a challenge string with the user's passkey
- * Returns base64-encoded signature or null on failure
- *
- * @param {string} challenge - Challenge string to sign
- * @returns {Promise<string|null>}
- */
-async function signChallengeWithPasskey(challenge) {
-  try {
-    const challengeBuffer = new TextEncoder().encode(challenge);
-
-    const assertion = await navigator.credentials.get({
-      publicKey: {
-        challenge: challengeBuffer,
-        timeout: 60000,
-        userVerification: 'preferred',
-        rpId: window.location.hostname,
-      },
-    });
-
-    if (!assertion) return null;
-
-    // Return signature as base64
-    const sig = assertion.response.signature;
-    return btoa(String.fromCharCode(...new Uint8Array(sig)));
-  } catch (err) {
-    console.error('[Bookish:Faucet] Passkey sign failed:', err);
-    return null;
-  }
-}
-
-/**
  * Check if wallet is eligible for faucet funding
- * (Has zero balance and is a passkey account)
+ * (Has an account and zero balance)
  *
  * @returns {Promise<boolean>}
  */
 export async function isEligibleForFaucet() {
-  // Must be passkey account
-  const { PASSKEY_STORAGE_KEY } = await import('./storage_constants.js');
-  const passkeyMeta = localStorage.getItem(PASSKEY_STORAGE_KEY);
-  if (!passkeyMeta) return false;
+  // Must have an account
+  const { ACCOUNT_STORAGE_KEY } = await import('./storage_constants.js');
+  const accountData = localStorage.getItem(ACCOUNT_STORAGE_KEY);
+  if (!accountData) return false;
 
   // Must have zero balance
   try {

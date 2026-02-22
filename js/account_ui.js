@@ -1,23 +1,21 @@
 // account_ui.js - Clean account management UI orchestrator
-// Coordinates between: account_creation, passkey_protection, account_arweave, passkey_mapping
-// Clear separation: creation → protection choice → persistence on funding
+// Coordinates between: account_creation, credential_core, credential_mapping, account_arweave
+// Clear separation: creation → email+password auth → persistence on funding
 
 import { createNewAccount, restoreAccountFromSeed } from './core/account_creation.js';
-import { protectAccountWithPasskey, unlockPasskeyProtectedAccount, isPasskeyProtected, getPasskeyMetadata } from './core/passkey_protection.js';
-import { isPRFSupported } from './core/passkey_core.js';
 import uiStatusManager from './ui_status_manager.js';
 import { stopSync, startSync } from './sync_manager.js';
 import { resetKeyState } from './app.js';
 import { uploadAccountMetadata, downloadAccountMetadata } from './core/account_arweave.js';
-import { uploadPasskeyMapping, getSeedByCredentialId } from './core/passkey_mapping.js';
-import { signInWithPasskey } from './core/passkey_signin.js';
 import { formatAddress, copyAddressToClipboard, getWalletBalance } from './core/wallet_core.js';
-import { deriveAndStoreSymmetricKey, hexToBytes, storeSessionEncryptedSeed, getSessionEncryptedSeed, clearSessionEncryptedSeed, clearPRFKey, getPRFKey } from './core/crypto_core.js';
-import { ACCOUNT_STORAGE_KEY, PASSKEY_STORAGE_KEY, SEED_SHOWN_KEY } from './core/storage_constants.js';
+import { deriveAndStoreSymmetricKey, hexToBytes, storeSessionEncryptedSeed, getSessionEncryptedSeed, clearSessionEncryptedSeed, importAesKey, bytesToBase64, base64ToBytes } from './core/crypto_core.js';
+import { ACCOUNT_STORAGE_KEY, SEED_SHOWN_KEY, CREDENTIAL_STORAGE_KEY, PENDING_CREDENTIAL_MAPPING_KEY, PENDING_ESCROW_MAPPING_KEY } from './core/storage_constants.js';
 import * as storageManager from './core/storage_manager.js';
 import { openOnrampWidget, isCoinbaseOnrampConfigured } from './core/coinbase_onramp.js';
 import { formatBalanceAsBooks, getBalanceStatus } from './core/balance_display.js';
 import { requestFaucetFunding, isEligibleForFaucet } from './core/faucet_client.js';
+import { deriveCredentialKeys, normalizeUsername, encryptCredentialPayload, decryptCredentialPayload, assessPasswordStrength, isValidEmail } from './core/credential_core.js';
+import { uploadCredentialMapping, downloadCredentialMapping, credentialMappingExists } from './core/credential_mapping.js';
 
 // Global state
 let currentBalanceETH = null;
@@ -156,7 +154,7 @@ async function renderAccountModalContent(container) {
     console.log('[Bookish:AccountUI] Rendering modal content, isLoggedIn:', isLoggedIn);
 
     if (isLoggedIn) {
-      let walletInfo, passkeyMeta, persistenceState, persistenceIndicator;
+      let walletInfo, persistenceState, persistenceIndicator;
 
       try {
         walletInfo = await getStoredWalletInfo();
@@ -166,20 +164,12 @@ async function renderAccountModalContent(container) {
         walletInfo = null;
       }
 
-      try {
-        passkeyMeta = getPasskeyMetadata();
-        console.log('[Bookish:AccountUI] Got passkey meta:', !!passkeyMeta);
-      } catch (e) {
-        console.error('[Bookish:AccountUI] Error getting passkey meta:', e);
-        passkeyMeta = null;
-      }
-
       const accountData = localStorage.getItem(ACCOUNT_STORAGE_KEY);
       let displayName = 'Anonymous';
       if (accountData) {
         try {
           const accountObj = JSON.parse(accountData);
-          displayName = accountObj.displayName || passkeyMeta?.userDisplayName || 'Anonymous';
+          displayName = accountObj.displayName || 'Anonymous';
         } catch (e) {
           console.error('[Bookish:AccountUI] Failed to parse account data:', e);
         }
@@ -210,9 +200,8 @@ async function renderAccountModalContent(container) {
         balanceStatus = 'empty';
       }
 
-      // Determine protection type
-      const isProtected = isPasskeyProtected();
-      const protectionType = isProtected ? '🔐 Passkey' : '🔑 Manual Seed';
+      const accountObj = JSON.parse(accountData);
+      const accountEmail = accountObj.email || '';
 
       // Check if account is backed up
       try {
@@ -231,65 +220,30 @@ async function renderAccountModalContent(container) {
 
       <div class="account-info">
         <div class="account-name">👤 ${displayName}</div>
-        ${fullAddress ? `
-          <div class="account-address-row" style="display: flex; align-items: center; gap: 8px; margin-top: 8px;">
-            <span style="font-size: 0.8rem; color: #64748b;">Address:</span>
-            <span class="account-address" style="font-family: var(--font-mono); font-size: 0.8rem; color: #94a3b8;">${shortAddress}</span>
-            <button id="copyAddressBtn" class="btn-icon copy-btn" style="background: transparent; border: 1px solid #334155; color: #94a3b8; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; gap: 4px;" title="Copy address">
-              📋 Copy
-            </button>
-          </div>
+        ${accountEmail ? `
+          <div style="font-size: 0.8rem; color: #94a3b8; margin-top: 4px;">${accountEmail}</div>
         ` : ''}
         <div class="account-balance" style="margin-top: 12px; font-size: 0.85rem;">
           Balance: <span id="accountBalanceDisplay" class="balance-display balance-${balanceStatus}">${balanceText}</span>
         </div>
-        <div class="account-protection" style="margin-top: 8px; font-size: 0.85rem; color: #94a3b8;">
-          Protection: ${protectionType}
-        </div>
       </div>
 
       <div class="account-actions" style="margin-top: 24px;">
-        ${!isBackedUp ? (() => {
-          const buttonText = isFunded ? 'Add Credit' : 'Enable Cloud Backup';
+        ${(() => {
+          const buttonText = !isFunded ? 'Enable Cloud Backup' : 'Add Credit';
           return `<button id="enableBackupBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">${buttonText}</button>`;
-        })() : ''}
-        ${!isProtected ? `<button id="protectPasskeyBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">Protect with Passkey</button>` : ''}
-        <div style="display: flex; gap: 12px; margin-top: 12px;">
-          <button id="logoutBtn" class="btn secondary" style="flex: 1;">Log Out</button>
-          <button id="viewRecoveryBtn" class="btn secondary" style="flex: 1;">Recovery Phrase</button>
+        })()}
+        <div style="display: flex; justify-content: center; gap: 16px; margin-top: 16px; font-size: 0.8rem;">
+          <button id="viewRecoveryBtn" style="background: transparent; border: none; color: #64748b; cursor: pointer; text-decoration: underline; font-size: 0.8rem; padding: 4px;">Recovery Phrase</button>
+          <button id="logoutBtn" style="background: transparent; border: none; color: #64748b; cursor: pointer; text-decoration: underline; font-size: 0.8rem; padding: 4px;">Sign Out</button>
         </div>
       </div>
     `;
 
     // Setup event listeners for logged-in state
-    document.getElementById('copyAddressBtn')?.addEventListener('click', async () => {
-      if (fullAddress) {
-        try {
-          await copyAddressToClipboard(fullAddress);
-          const btn = document.getElementById('copyAddressBtn');
-          if (btn) {
-            const originalText = btn.innerHTML;
-            btn.innerHTML = '✓ Copied';
-            btn.style.color = '#10b981';
-            setTimeout(() => {
-              btn.innerHTML = originalText;
-              btn.style.color = '#94a3b8';
-            }, 2000);
-          }
-        } catch (e) {
-          console.error('[Bookish:AccountUI] Failed to copy address:', e);
-        }
-      }
-    });
-
     document.getElementById('enableBackupBtn')?.addEventListener('click', () => {
       // DO NOT close account modal - open funding dialog on top
       handleBuyStorage();
-    });
-
-    document.getElementById('protectPasskeyBtn')?.addEventListener('click', () => {
-      // DO NOT close account modal - open passkey flow on top
-      handleAddPasskey();
     });
 
     document.getElementById('logoutBtn')?.addEventListener('click', () => {
@@ -311,17 +265,11 @@ async function renderAccountModalContent(container) {
       </p>
 
       <div class="account-actions">
-        <button id="createAccountBtn" class="btn primary">Create Account</button>
+        <button id="createAccountBtn" class="btn primary" style="width: 100%;">Create Account</button>
       </div>
 
-      <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #334155;">
-        <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 12px;">
-          Already have an account?
-        </div>
-        <div style="display: flex; gap: 16px;">
-          <button id="loginBtn" class="btn-link" style="font-size: 0.85rem;">Sign in with passkey</button>
-          <button id="importSeedBtn" class="btn-link" style="font-size: 0.85rem;">Use recovery phrase</button>
-        </div>
+      <div class="auth-footer" style="margin-top: 20px; padding-top: 16px; border-top: 1px solid #334155;">
+        <div>Already have an account? <button class="link-btn" id="loginBtn">Sign in</button></div>
       </div>
     `;
 
@@ -333,15 +281,7 @@ async function renderAccountModalContent(container) {
 
     document.getElementById('loginBtn')?.addEventListener('click', () => {
       closeAccountModal();
-      handleCrossDeviceSignIn();
-    });
-
-    document.getElementById('importSeedBtn')?.addEventListener('click', () => {
-      closeAccountModal();
-      // Wait for accountModal to close before showing seed input modal
-      setTimeout(() => {
-        handleManualSeedLogin();
-      }, 250);
+      handleSignIn();
     });
   }
   } catch (error) {
@@ -471,492 +411,637 @@ async function updateAccountSection(section, isLoggedIn) {
 }
 
 /**
- * Handle account creation - NEW 2-STEP FLOW
- * Step 1: Generate seed + wallet (no passkey yet)
- * Step 2: Ask user if they want passkey protection
+ * Handle account creation - Email + Password flow
+ * Frame A1: Email + Display Name + Password + Confirm Password form
  */
 async function handleCreateAccount() {
-  // Step 1: Ask for display name with friendly copy
   showAccountModal(`
-    <div style="text-align:center;margin-bottom:20px;">
-      <div style="font-size:2.5rem;margin-bottom:8px;">👤</div>
+    <div class="modal-content-enter" style="text-align:center;margin-bottom:16px;">
       <h3 style="margin:0;">Create Your Account</h3>
     </div>
 
-    <div style="margin:20px 0;">
-      <label style="display:block;font-size:.875rem;margin-bottom:8px;opacity:.9;">What should we call you?</label>
-      <input type="text" id="displayNameInput" placeholder="Your name" style="width:100%;padding:12px;background:#0b1220;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-size:.875rem;" />
-      <div style="font-size:.75rem;opacity:.6;margin-top:6px;">This is just for display.</div>
+    <form id="accountCreateForm" class="auth-form" autocomplete="on" novalidate>
+      <div class="form-group">
+        <label for="acctEmail">Email</label>
+        <input type="email" id="acctEmail" autocomplete="email" placeholder="you@example.com" required>
+        <span class="field-hint">This is your sign-in ID — we won't send you any emails.</span>
+        <span class="field-preview" id="emailPreview" aria-live="polite"></span>
+        <span class="field-error" id="emailError" role="alert"></span>
+      </div>
+
+      <div class="form-group">
+        <label for="acctDisplayName">Display Name</label>
+        <input type="text" id="acctDisplayName" placeholder="Your name" required>
+      </div>
+
+      <div class="form-group">
+        <label for="acctPassword">Password</label>
+        <div class="password-field">
+          <input type="password" id="acctPassword" autocomplete="new-password" placeholder="At least 8 characters" required minlength="8">
+          <button type="button" class="password-toggle" id="togglePassword1" aria-label="Show password">👁</button>
+        </div>
+        <div class="password-strength" aria-live="polite">
+          <div class="strength-bar"><div class="strength-fill" id="strengthFill"></div></div>
+          <span class="strength-label" id="strengthLabel"></span>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="acctConfirmPassword">Confirm Password</label>
+        <div class="password-field">
+          <input type="password" id="acctConfirmPassword" autocomplete="new-password" placeholder="Re-enter password" required>
+          <button type="button" class="password-toggle" id="togglePassword2" aria-label="Show password">👁</button>
+        </div>
+        <span class="field-match" id="passwordMatch" aria-live="polite"></span>
+      </div>
+
+      <div class="form-group" style="margin-top:20px;">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:.8rem;color:var(--color-text-secondary);">
+          <input type="checkbox" id="escrowOptIn" checked style="width:16px;height:16px;accent-color:var(--color-primary);cursor:pointer;">
+          Enable account recovery
+        </label>
+        <div id="escrowDetails" style="display:none;margin-top:8px;font-size:.75rem;line-height:1.5;color:var(--color-text-muted);padding:10px 12px;background:var(--color-bg-base);border:1px solid var(--color-border-subtle);border-radius:6px;">
+          If you forget your password, the Bookish team can help you recover your account.
+          This means we store an encrypted backup that only we can access.
+          <strong style="display:block;margin-top:6px;color:#f59e0b;">Turning this off means nobody can help if you forget your password.</strong>
+        </div>
+        <button type="button" id="escrowLearnMore" class="link-btn" style="font-size:.7rem;margin-top:4px;color:rgba(255,255,255,.6);">Learn more</button>
+      </div>
+
+      <button type="submit" id="createAccountSubmitBtn" class="btn primary" style="width:100%;padding:14px 20px;margin-top:16px;" disabled>Create Account</button>
+    </form>
+
+    <div class="auth-footer">
+      <div>Already have an account? <button class="link-btn" id="switchToSignIn">Sign in</button></div>
     </div>
+  `, true);
 
-    <div id="createAccountStatus" style="margin:12px 0;font-size:.875rem;text-align:center;"></div>
+  // Wire up form logic
+  const emailInput = document.getElementById('acctEmail');
+  const displayNameInput = document.getElementById('acctDisplayName');
+  const passwordInput = document.getElementById('acctPassword');
+  const confirmInput = document.getElementById('acctConfirmPassword');
+  const submitBtn = document.getElementById('createAccountSubmitBtn');
+  const emailPreview = document.getElementById('emailPreview');
+  const emailError = document.getElementById('emailError');
+  const strengthFill = document.getElementById('strengthFill');
+  const strengthLabel = document.getElementById('strengthLabel');
+  const passwordMatchEl = document.getElementById('passwordMatch');
 
-    <button id="confirmCreateBtn" class="btn" style="width:100%;padding:14px 20px;margin-top:16px;">Continue →</button>
-
-    <div class="modal-progress" style="display:flex;justify-content:center;gap:8px;margin-top:20px;">
-      <span class="dot active" style="width:8px;height:8px;border-radius:50%;background:#2563eb;"></span>
-      <span class="dot" style="width:8px;height:8px;border-radius:50%;background:#334155;"></span>
-    </div>
-  `);
-
-  document.getElementById('confirmCreateBtn').onclick = async () => {
-    const displayName = document.getElementById('displayNameInput').value.trim();
-    const statusDiv = document.getElementById('createAccountStatus');
-
-    if (!displayName) {
-      statusDiv.innerHTML = '<span style="color:#ef4444;">Please enter a display name</span>';
-      return;
-    }
-
-    try {
-      statusDiv.textContent = 'Creating account...';
-
-      // STEP 1: Create account (seed + wallet) - NO PASSKEY YET
-      const account = await createNewAccount();
-
-      console.log('[Bookish:AccountUI] Account created:', account.address);
-
-      // Store wallet info and display name temporarily
-      window.__tempAccount = { ...account, displayName };
-
-      // Show security setup (passkey-first, no seed visible by default)
-      closeAccountModal();
-      showSecuritySetupModal(account.seed, account.address, displayName);
-
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Account creation failed:', error);
-      statusDiv.innerHTML = `<span style="color:#ef4444;">${error.message}</span>`;
-    }
-  };
-}
-
-/**
- * Show security setup modal after account creation
- * Passkey-first approach: seed phrase hidden by default, shown only via Advanced toggle
- */
-async function showSecuritySetupModal(seed, address, displayName) {
-  // Check if PRF (passkey) is supported in this browser
-  const prfSupported = await isPRFSupported();
-
-  if (!prfSupported) {
-    // Browser doesn't support passkeys - show fallback UI
-    showManualBackupModal(seed, displayName);
-    return;
+  // Validate all fields and update submit button state
+  function validateForm() {
+    const emailOk = isValidEmail(emailInput.value);
+    const nameOk = displayNameInput.value.trim().length > 0;
+    const passOk = passwordInput.value.length >= 8;
+    const matchOk = confirmInput.value.length > 0 && passwordInput.value === confirmInput.value;
+    submitBtn.disabled = !(emailOk && nameOk && passOk && matchOk);
   }
 
-  // Default: Passkey-first UI (no seed visible)
-  showAccountModal(`
-    <div style="text-align:center;margin-bottom:20px;">
-      <div style="font-size:2.5rem;margin-bottom:8px;">🔐</div>
-      <h3 style="margin:0;">Secure Your Account</h3>
-    </div>
-
-    <div style="margin:20px 0;">
-      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 8px 0;font-weight:500;">Use your device to sign in</p>
-      <p style="font-size:.8rem;line-height:1.5;opacity:.7;margin:0;">
-        You'll use Face ID, fingerprint, or your device passcode to access your account. It syncs automatically to your other devices.
-      </p>
-    </div>
-
-    <button id="setupPasskeyBtn" class="btn" style="width:100%;padding:14px 20px;margin-top:16px;background:#2563eb;">Set Up Passkey →</button>
-
-    <div id="securityStatus" style="margin:12px 0;font-size:.85rem;text-align:center;"></div>
-
-    <div id="advancedToggle" class="advanced-toggle" style="font-size:.75rem;color:#94a3b8;cursor:pointer;display:flex;align-items:center;gap:4px;margin-top:20px;">
-      <span id="advancedArrow">▸</span> Advanced: Manage backup manually
-    </div>
-
-    <div id="advancedOptions" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid #334155;">
-      <p style="font-size:.75rem;opacity:.7;margin:0 0 12px 0;">
-        For advanced users who prefer to manage their own recovery phrase.
-      </p>
-      <button id="showRecoveryBtn" class="btn secondary" style="width:100%;font-size:.8rem;">Skip passkey, show recovery phrase →</button>
-    </div>
-
-    <div class="modal-progress" style="display:flex;justify-content:center;gap:8px;margin-top:20px;">
-      <span class="dot" style="width:8px;height:8px;border-radius:50%;background:#334155;"></span>
-      <span class="dot active" style="width:8px;height:8px;border-radius:50%;background:#2563eb;"></span>
-    </div>
-  `, false);
-
-  // Handle passkey setup
-  document.getElementById('setupPasskeyBtn').onclick = async () => {
-    const statusDiv = document.getElementById('securityStatus');
-    try {
-      statusDiv.textContent = 'Setting up passkey...';
-
-      const account = window.__tempAccount;
-      const { credentialId } = await protectAccountWithPasskey(account.seed, `Bookish: ${account.displayName || 'User'}`);
-
-      console.log('[Bookish:AccountUI] Account protected with passkey:', credentialId);
-
-      // protectAccountWithPasskey already stored complete account data with encrypted seed
-      // Store displayName in passkey metadata
-      const passkeyMeta = JSON.parse(localStorage.getItem(PASSKEY_STORAGE_KEY) || '{}');
-      passkeyMeta.userDisplayName = account.displayName;
-      localStorage.setItem(PASSKEY_STORAGE_KEY, JSON.stringify(passkeyMeta));
-
-      // Don't call storeAccountInfo - it would overwrite and lose the enc field
-      await deriveAndStoreSymmetricKey(account.seed);
-      await window.bookishWallet.ensure();
-      await storeSessionEncryptedSeed(account.seed);
-      localStorage.setItem(SEED_SHOWN_KEY, 'true');
-
-      // Clean up temp
-      delete window.__tempAccount;
-
-      // Reset faucet state
-      transientState.faucetResult = null;
-      transientState.faucetTxHash = null;
-      transientState.faucetSkipped = false;
-
-      // Ensure modal is closed before showing loading state
-      closeAccountModal();
-      // Use requestAnimationFrame to ensure close completes before showing new modal
-      requestAnimationFrame(() => {
-        onAccountCreated(account.displayName, true, credentialId);
-      });
-
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Passkey protection failed:', error);
-
-      // User-friendly error message
-      let errorMsg = error.message;
-      if (error.message.includes('cancelled') || error.message.includes('timed out')) {
-        errorMsg = 'The security prompt closed. Let\'s try again.';
-      }
-
-      statusDiv.innerHTML = `<span style="color:#ef4444;">${errorMsg}</span>`;
-    }
-  };
-
-  // Advanced toggle
-  document.getElementById('advancedToggle').onclick = () => {
-    const options = document.getElementById('advancedOptions');
-    const arrow = document.getElementById('advancedArrow');
-    if (options.style.display === 'none') {
-      options.style.display = 'block';
-      arrow.textContent = '▾';
+  // Email normalization preview on blur
+  emailInput.addEventListener('blur', () => {
+    const val = emailInput.value.trim();
+    if (val && isValidEmail(val)) {
+      const normalized = normalizeUsername(val);
+      emailPreview.innerHTML = `<span class="preview-arrow">►</span> Signing in as <strong>${normalized}</strong>`;
+      emailError.classList.remove('visible');
+      emailInput.classList.remove('field-invalid');
+    } else if (val) {
+      emailError.textContent = '✗ Please enter a valid email address';
+      emailError.classList.add('visible');
+      emailInput.classList.add('field-invalid');
+      emailPreview.innerHTML = '';
     } else {
-      options.style.display = 'none';
-      arrow.textContent = '▸';
+      emailPreview.innerHTML = '';
+      emailError.classList.remove('visible');
+      emailInput.classList.remove('field-invalid');
     }
-  };
+    validateForm();
+  });
 
-  // Show recovery phrase button
-  document.getElementById('showRecoveryBtn').onclick = () => {
-    closeAccountModal();
-    showManualBackupModal(seed, displayName);
-  };
+  // Display name validation
+  displayNameInput.addEventListener('input', validateForm);
+
+  // Password strength indicator
+  passwordInput.addEventListener('input', () => {
+    const result = assessPasswordStrength(passwordInput.value);
+    strengthFill.style.width = result.percent + '%';
+    strengthLabel.textContent = result.label;
+
+    // Reset classes
+    strengthFill.className = 'strength-fill';
+    strengthLabel.className = 'strength-label';
+
+    if (result.score <= 1) {
+      strengthFill.classList.add('strength-weak');
+      strengthLabel.classList.add('strength-weak');
+    } else if (result.score <= 3) {
+      strengthFill.classList.add('strength-medium');
+      strengthLabel.classList.add('strength-medium');
+    } else {
+      strengthFill.classList.add('strength-good');
+      strengthLabel.classList.add('strength-good');
+    }
+
+    // Update confirm match if already typed
+    if (confirmInput.value.length > 0) {
+      updatePasswordMatch();
+    }
+    validateForm();
+  });
+
+  // Confirm password match
+  function updatePasswordMatch() {
+    if (confirmInput.value.length === 0) {
+      passwordMatchEl.textContent = '';
+      passwordMatchEl.className = 'field-match';
+      return;
+    }
+    if (passwordInput.value === confirmInput.value) {
+      passwordMatchEl.textContent = '✓ Passwords match';
+      passwordMatchEl.className = 'field-match match-success';
+    } else {
+      passwordMatchEl.textContent = '✗ Passwords don\'t match';
+      passwordMatchEl.className = 'field-match match-error';
+    }
+  }
+  confirmInput.addEventListener('input', () => {
+    updatePasswordMatch();
+    validateForm();
+  });
+  confirmInput.addEventListener('blur', () => {
+    updatePasswordMatch();
+    validateForm();
+  });
+
+  // Password visibility toggles
+  document.getElementById('togglePassword1').addEventListener('click', () => {
+    const type = passwordInput.type === 'password' ? 'text' : 'password';
+    passwordInput.type = type;
+    document.getElementById('togglePassword1').setAttribute('aria-label', type === 'password' ? 'Show password' : 'Hide password');
+  });
+  document.getElementById('togglePassword2').addEventListener('click', () => {
+    const type = confirmInput.type === 'password' ? 'text' : 'password';
+    confirmInput.type = type;
+    document.getElementById('togglePassword2').setAttribute('aria-label', type === 'password' ? 'Show password' : 'Hide password');
+  });
+
+  // Escrow "Learn more" toggle
+  document.getElementById('escrowLearnMore').addEventListener('click', () => {
+    const details = document.getElementById('escrowDetails');
+    const btn = document.getElementById('escrowLearnMore');
+    if (details.style.display === 'none') {
+      details.style.display = 'block';
+      btn.textContent = 'Hide details';
+    } else {
+      details.style.display = 'none';
+      btn.textContent = 'Learn more';
+    }
+  });
+
+  // Switch to sign-in
+  document.getElementById('switchToSignIn').addEventListener('click', () => {
+    closeHelperModal();
+    handleSignIn();
+  });
+
+  // Form submission
+  document.getElementById('accountCreateForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (submitBtn.disabled) return;
+
+    const email = normalizeUsername(emailInput.value);
+    const displayName = displayNameInput.value.trim();
+    const password = passwordInput.value;
+    const escrowEnabled = document.getElementById('escrowOptIn').checked;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating...';
+
+    try {
+      await runAccountCreationFlow(email, displayName, password, escrowEnabled);
+    } catch (error) {
+      console.error('[Bookish:AccountUI] Account creation failed:', error);
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create Account';
+    }
+  });
+
+  // Enter key submission
+  [emailInput, displayNameInput, passwordInput, confirmInput].forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !submitBtn.disabled) {
+        e.preventDefault();
+        document.getElementById('accountCreateForm').dispatchEvent(new Event('submit'));
+      }
+    });
+  });
 }
 
 /**
- * Show manual backup modal with recovery phrase and confirmation checkbox
- * Used when user explicitly chooses manual path or browser doesn't support passkeys
+ * Run the full account creation flow (Frames A2-A6)
+ * Called after form validation succeeds
+ * @param {string} email - Normalized email
+ * @param {string} displayName - User display name
+ * @param {string} password - User password
+ * @param {boolean} escrowEnabled - Whether to send escrow recovery record
  */
-function showManualBackupModal(seed, displayName) {
-  const words = seed.split(' ');
-
+async function runAccountCreationFlow(email, displayName, password, escrowEnabled = true) {
+  // Frame A2: Setting up - Creating account
   showAccountModal(`
-    <h3 style="margin:0 0 16px 0;">Your Recovery Phrase</h3>
-
-    <div style="background:#f59e0b1a;border:1px solid #f59e0b;border-radius:6px;padding:12px;margin-bottom:16px;">
-      <p style="font-size:.8rem;line-height:1.5;color:#f59e0b;margin:0;">
-        <strong>Save these 12 words</strong><br>
-        These words are the ONLY way to recover your account if you lose access to all devices.
+    <div class="modal-content-enter" style="text-align:center;padding:20px 0;">
+      <div style="font-size:2rem;margin-bottom:16px;">⏳</div>
+      <h3 style="margin:0 0 16px 0;">Setting up your account...</h3>
+      <div class="progress-steps">
+        <div id="createStep1" class="progress-step active">
+          <span class="step-icon">◐</span> <span>Creating account...</span>
+        </div>
+        <div id="createStep2" class="progress-step pending">
+          <span class="step-icon">○</span> <span>Activating cloud storage</span>
+        </div>
+        <div id="createStep3" class="progress-step pending">
+          <span class="step-icon">○</span> <span>Syncing to cloud</span>
+        </div>
+      </div>
+      <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-muted);margin:16px 0 0 0;">
+        This usually takes just a moment.
       </p>
     </div>
-
-    <div style="background:#0b1220;border:1px solid #334155;border-radius:6px;padding:16px;position:relative;">
-      <button id="copyRecoveryBtn" style="position:absolute;top:8px;right:8px;padding:4px 8px;font-size:.7rem;background:#1e293b;border:1px solid #334155;border-radius:4px;color:#e2e8f0;cursor:pointer;">Copy 📋</button>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-family:monospace;font-size:.8rem;">
-        ${words.map((word, i) => `
-          <div style="display:flex;gap:6px;">
-            <span style="opacity:.5;min-width:18px;">${i + 1}.</span>
-            <span style="font-weight:500;">${word}</span>
-          </div>
-        `).join('')}
-      </div>
-    </div>
-
-    <label class="checkbox-confirm" style="display:flex;align-items:center;gap:8px;font-size:.8rem;margin:16px 0;cursor:pointer;">
-      <input type="checkbox" id="confirmSavedCheckbox" style="width:18px;height:18px;accent-color:#2563eb;">
-      <span>I've saved my recovery phrase</span>
-    </label>
-
-    <button id="completeSetupBtn" class="btn" style="width:100%;padding:14px 20px;opacity:.5;cursor:not-allowed;" disabled>Complete Setup →</button>
-
-    <div id="manualSetupStatus" style="margin-top:12px;font-size:.85rem;text-align:center;"></div>
   `, false);
 
-  // Copy button
-  document.getElementById('copyRecoveryBtn').onclick = async () => {
+  try {
+    // Step 1a: Derive credential keys first (PBKDF2 - 0.5-3s)
+    // Done before seed generation so we can check for duplicates
+    const { lookupKey, encryptionKey } = await deriveCredentialKeys(email, password);
+
+    // Step 1b: Check if an account already exists with these credentials
+    // Same email + same password = same lookup key → would shadow existing account
     try {
-      await navigator.clipboard.writeText(seed);
-      const btn = document.getElementById('copyRecoveryBtn');
-      btn.textContent = '✓ Copied!';
-      setTimeout(() => { btn.textContent = 'Copy 📋'; }, 2000);
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Copy failed:', error);
+      const existingMapping = await credentialMappingExists(lookupKey);
+      if (existingMapping) {
+        console.log('[Bookish:AccountUI] Credential mapping already exists for these credentials');
+        // Show error and offer to sign in instead
+        showAccountModal(`
+          <div class="modal-content-enter" style="text-align:center;padding:20px 0;">
+            <h3 style="margin:0 0 16px 0;">Account Already Exists</h3>
+            <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 20px 0;">
+              An account with this email and password already exists. Would you like to sign in instead?
+            </p>
+            <button id="goToSignInBtn" class="btn primary" style="width:100%;padding:14px 20px;margin-bottom:12px;">Sign In</button>
+            <button id="backToCreateBtn" class="btn secondary" style="width:100%;padding:12px 20px;">Back to Create Account</button>
+          </div>
+        `);
+        document.getElementById('goToSignInBtn').onclick = () => {
+          closeHelperModal();
+          handleSignIn();
+        };
+        document.getElementById('backToCreateBtn').onclick = () => {
+          closeHelperModal();
+          handleCreateAccount();
+        };
+        return;
+      }
+    } catch (checkErr) {
+      // Network error checking existence — continue with creation
+      // (if the mapping truly exists, the user will just end up with a shadowed account,
+      // but this is better than blocking creation when Arweave is temporarily unreachable)
+      console.warn('[Bookish:AccountUI] Could not check for existing mapping (continuing):', checkErr.message);
     }
-  };
 
-  // Checkbox enables button
-  document.getElementById('confirmSavedCheckbox').onchange = (e) => {
-    const btn = document.getElementById('completeSetupBtn');
-    if (e.target.checked) {
-      btn.disabled = false;
-      btn.style.opacity = '1';
-      btn.style.cursor = 'pointer';
-    } else {
-      btn.disabled = true;
-      btn.style.opacity = '.5';
-      btn.style.cursor = 'not-allowed';
-    }
-  };
+    // Step 1c: Create account locally (generate new seed)
+    const account = await createNewAccount();
+    console.log('[Bookish:AccountUI] Account created:', account.address);
 
-  // Complete setup (manual path)
-  document.getElementById('completeSetupBtn').onclick = async () => {
-    const account = window.__tempAccount;
+    // Encrypt entire credential payload (seed + metadata) per spec
+    const createdAt = Date.now();
+    const encryptedPayload = await encryptCredentialPayload(
+      { seed: account.seed, displayName, createdAt },
+      encryptionKey
+    );
 
-    // Store account without passkey protection (manual seed storage)
-    const accountData = {
-      version: 1,
-      derivation: 'manual',
-      displayName: account.displayName,
-      created: Date.now()
-    };
-    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accountData));
-
-    // Store seed in localStorage for manual accounts
-    const { MANUAL_SEED_STORAGE_KEY } = await import('./core/storage_constants.js');
-    localStorage.setItem(MANUAL_SEED_STORAGE_KEY, account.seed);
-
+    // Store everything locally
     await deriveAndStoreSymmetricKey(account.seed);
     await window.bookishWallet.ensure();
     await storeSessionEncryptedSeed(account.seed);
-    localStorage.setItem(SEED_SHOWN_KEY, 'true');
 
-    // Clean up temp
-    delete window.__tempAccount;
-
-    // Ensure modal is closed before showing success
-    closeAccountModal();
-    // Use requestAnimationFrame to ensure close completes before showing new modal
-    requestAnimationFrame(() => {
-      showSuccessModal(account.displayName, false);
-    });
-  };
-}
-
-/**
- * Handle account creation completion - shows loading state, runs faucet, then shows success modal
- * @param {string} displayName - User's display name
- * @param {boolean} isPasskey - Whether account is passkey-protected
- * @param {string} credentialId - Passkey credential ID (if passkey account)
- */
-async function onAccountCreated(displayName, isPasskey, credentialId = null) {
-  // For passkey accounts, show loading state and run faucet
-  if (isPasskey) {
-    // Show interim loading state with skip option
-    showAccountModal(`
-      <div style="text-align:center;padding:20px 0;">
-        <div style="font-size:3rem;margin-bottom:16px;opacity:.9;">⏳</div>
-        <h3 style="margin:0 0 16px 0;">Setting up your account...</h3>
-        <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;margin:0 0 24px 0;text-align:left;">
-          <div class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;color:#10b981;">
-            <span>✓</span> <span>Account created</span>
-          </div>
-          <div class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;color:#10b981;">
-            <span>✓</span> <span>Passkey enrolled</span>
-          </div>
-          <div id="setupStep3" class="setup-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;">
-            <span>◐</span> <span>Activating cloud storage...</span>
-          </div>
-        </div>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 16px 0;">
-          This usually takes just a moment.
-        </p>
-        <button id="skipFaucetWaitBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;text-decoration:underline;">Skip this step →</button>
-      </div>
-    `);
-
-    // Skip button handler
-    document.getElementById('skipFaucetWaitBtn').onclick = () => {
-      transientState.faucetSkipped = true;
-      transientState.faucetResult = 'skipped';
-      showSuccessModal(displayName, isPasskey, credentialId);
+    // Store account info
+    const accountData = {
+      version: 2,
+      derivation: 'credential',
+      displayName,
+      email,
+      created: createdAt
     };
+    localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accountData));
 
-    // Run faucet with 20-second timeout (accounts for retries: 1s + 2s + 4s delays + request time)
-    const eligible = await isEligibleForFaucet();
-    if (eligible && !transientState.faucetSkipped) {
+    // Hide the "Create an account" banner immediately — user is now logged in
+    const banner = document.getElementById('accountBanner');
+    if (banner) banner.style.display = 'none';
+
+    // Store credential metadata
+    localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify({
+      lookupKey,
+      hasEscrow: false
+    }));
+
+    // Persist pending credential mapping to localStorage (survives page reload)
+    const pendingMapping = { lookupKey, encryptedPayloadB64: bytesToBase64(encryptedPayload) };
+    localStorage.setItem(PENDING_CREDENTIAL_MAPPING_KEY, JSON.stringify(pendingMapping));
+
+    // Prepare escrow mapping (worker encrypts with admin key, we upload to Arweave)
+    // Done early so it's ready to upload alongside credential-mapping after funding
+    if (escrowEnabled) {
+      await prepareEscrowMapping(account.seed, email, displayName);
+    }
+
+    // Mark step 1 complete
+    updateProgressStep('createStep1', 'complete', '✓', 'Account created');
+    updateProgressStep('createStep2', 'active', '◐', 'Activating cloud storage...');
+
+    // Show skip button after 2 seconds
+    setTimeout(() => {
+      const skipBtn = document.getElementById('skipFaucetBtn');
+      if (skipBtn) skipBtn.style.display = 'inline';
+    }, 2000);
+
+    // Add skip button (hidden initially)
+    const progressSteps = document.querySelector('.progress-steps');
+    if (progressSteps) {
+      progressSteps.insertAdjacentHTML('afterend',
+        '<div style="text-align:center;margin-top:12px;"><button id="skipFaucetBtn" class="btn-link" style="display:none;font-size:.875rem;color:var(--color-text-muted);text-decoration:underline;background:none;border:none;cursor:pointer;">Skip this step →</button></div>'
+      );
+      document.getElementById('skipFaucetBtn')?.addEventListener('click', () => {
+        showCreationFallbackSuccess(displayName, email);
+      });
+    }
+
+    // Step 2: Faucet funding
+    const address = await window.bookishWallet?.getAddress?.();
+    let faucetOK = false;
+
+    if (address) {
       try {
-        // Get wallet address
-        const address = await window.bookishWallet?.getAddress?.();
-        if (address) {
-          // Race between faucet request (with retries) and timeout
-          const result = await Promise.race([
-            requestFaucetFunding(address, credentialId, 3), // 3 retries
-            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 20000))
-          ]);
-          transientState.faucetResult = result.success ? 'funded' : (result.code || 'failed');
-          transientState.faucetTxHash = result.txHash || null;
-        } else {
-          transientState.faucetResult = 'failed';
-        }
+        const faucetResult = await Promise.race([
+          requestFaucetFunding(address, null, 3),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 20000))
+        ]);
+        faucetOK = faucetResult.success;
+        transientState.faucetResult = faucetResult.success ? 'funded' : 'failed';
+        transientState.faucetTxHash = faucetResult.txHash || null;
       } catch (e) {
-        console.error('[Bookish:AccountUI] Faucet request error:', e);
+        console.error('[Bookish:AccountUI] Faucet error:', e);
         transientState.faucetResult = e.message === 'timeout' ? 'timeout' : 'failed';
       }
-    } else {
-      transientState.faucetResult = 'failed'; // Not eligible
     }
-  } else {
-    // Manual accounts: no faucet, just show success modal
-    transientState.faucetResult = null;
-  }
 
-  // Now show final success modal
-  showSuccessModal(displayName, isPasskey, credentialId);
+    if (!faucetOK) {
+      // Faucet failed - show fallback success
+      showCreationFallbackSuccess(displayName, email);
+      return;
+    }
+
+    // Step 3: Upload to Arweave
+    updateProgressStep('createStep2', 'complete', '✓', 'Cloud storage activated');
+    updateProgressStep('createStep3', 'active', '◐', 'Syncing to cloud...');
+
+    // Update heading
+    const heading = document.querySelector('#helperModal h3');
+    if (heading) heading.textContent = 'Almost there...';
+
+    // Hide skip button
+    const skipBtn = document.getElementById('skipFaucetBtn');
+    if (skipBtn) skipBtn.style.display = 'none';
+
+    try {
+      // Upload credential mapping (encrypted payload)
+      const credTxId = await uploadCredentialMapping({
+        lookupKey,
+        encryptedPayload
+      });
+      console.log('[Bookish:AccountUI] Credential mapping uploaded:', credTxId);
+
+      // Upload account metadata
+      const symKeyHex = localStorage.getItem('bookish.sym');
+      const symKeyBytes = hexToBytes(symKeyHex);
+      const symKey = await importAesKey(symKeyBytes);
+      const metaTxId = await uploadAccountMetadata({
+        address,
+        displayName,
+        symKey,
+        createdAt: accountData.created
+      });
+      console.log('[Bookish:AccountUI] Account metadata uploaded:', metaTxId);
+
+      // Upload escrow mapping to Arweave (if prepared earlier)
+      const pendingEscrowRaw = localStorage.getItem(PENDING_ESCROW_MAPPING_KEY);
+      if (pendingEscrowRaw) {
+        try {
+          const pendingEscrow = JSON.parse(pendingEscrowRaw);
+          if (pendingEscrow.lookupKey && pendingEscrow.encryptedPayloadB64) {
+            const escrowPayload = base64ToBytes(pendingEscrow.encryptedPayloadB64);
+            const escrowTxId = await uploadCredentialMapping({
+              lookupKey: pendingEscrow.lookupKey,
+              encryptedPayload: escrowPayload
+            });
+            console.log('[Bookish:AccountUI] Escrow mapping uploaded to Arweave:', escrowTxId);
+            localStorage.removeItem(PENDING_ESCROW_MAPPING_KEY);
+
+            const credStore = JSON.parse(localStorage.getItem(CREDENTIAL_STORAGE_KEY) || '{}');
+            credStore.hasEscrow = true;
+            credStore.escrowTxId = escrowTxId;
+            localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify(credStore));
+          }
+        } catch (escrowErr) {
+          console.warn('[Bookish:AccountUI] Escrow upload failed (non-fatal):', escrowErr);
+        }
+      } else if (!escrowEnabled) {
+        console.log('[Bookish:AccountUI] Escrow skipped (user opted out for privacy)');
+        const credStore = JSON.parse(localStorage.getItem(CREDENTIAL_STORAGE_KEY) || '{}');
+        credStore.hasEscrow = false;
+        localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify(credStore));
+      }
+
+      // Update local state with Arweave tx IDs
+      const storedAccount = JSON.parse(localStorage.getItem(ACCOUNT_STORAGE_KEY));
+      storedAccount.arweaveTxId = metaTxId;
+      storedAccount.credentialMappingTxId = credTxId;
+      storedAccount.persistedAt = Date.now();
+      localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(storedAccount));
+
+      // Clean up pending mappings from localStorage
+      localStorage.removeItem(PENDING_CREDENTIAL_MAPPING_KEY);
+
+      // Show full success (Frame A6)
+      showCreationFullSuccess(displayName, email);
+
+    } catch (uploadError) {
+      console.error('[Bookish:AccountUI] Arweave upload failed:', uploadError);
+      // Retry once
+      try {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const credTxId = await uploadCredentialMapping({ lookupKey, encryptedPayload });
+        const symKeyHex = localStorage.getItem('bookish.sym');
+        const symKeyBytes = hexToBytes(symKeyHex);
+        const symKey = await importAesKey(symKeyBytes);
+        const metaTxId = await uploadAccountMetadata({ address, displayName, symKey, createdAt: accountData.created });
+
+        const storedAccount = JSON.parse(localStorage.getItem(ACCOUNT_STORAGE_KEY));
+        storedAccount.arweaveTxId = metaTxId;
+        storedAccount.credentialMappingTxId = credTxId;
+        storedAccount.persistedAt = Date.now();
+        localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(storedAccount));
+        localStorage.removeItem(PENDING_CREDENTIAL_MAPPING_KEY);
+
+        showCreationFullSuccess(displayName, email);
+      } catch (retryErr) {
+        console.error('[Bookish:AccountUI] Retry failed:', retryErr);
+        showCreationFallbackSuccess(displayName, email);
+      }
+    }
+
+  } catch (error) {
+    console.error('[Bookish:AccountUI] Account creation flow failed:', error);
+    showAccountModal(`
+      <div style="text-align:center;padding:20px 0;">
+        <h3 style="margin:0 0 16px 0;">Something Went Wrong</h3>
+        <p style="font-size:.875rem;line-height:1.6;opacity:.9;">
+          ${error.message || 'Account creation failed. Please try again.'}
+        </p>
+        <button id="retryCreateBtn" class="btn primary" style="width:100%;margin-top:20px;">Try Again</button>
+      </div>
+    `);
+    document.getElementById('retryCreateBtn').onclick = () => {
+      closeHelperModal();
+      handleCreateAccount();
+    };
+  }
 }
 
 /**
- * Show success modal after account creation
- * @param {string} displayName - User's display name
- * @param {boolean} isPasskey - Whether account is passkey-protected
- * @param {string} credentialId - Passkey credential ID (if passkey account)
+ * Helper: Update a progress step element
  */
-async function showSuccessModal(displayName, isPasskey, credentialId = null) {
-  const protectionMessage = isPasskey
-    ? 'Your account is protected by passkey.'
-    : 'Your account is secured with your recovery phrase. Keep it safe!';
+function updateProgressStep(stepId, state, icon, text) {
+  const step = document.getElementById(stepId);
+  if (!step) return;
+  step.className = `progress-step ${state}`;
+  step.querySelector('.step-icon').textContent = icon;
+  step.querySelector('span:last-child').textContent = text;
+}
 
-  // Check if account is funded (either via faucet or existing balance)
-  const faucetOK = transientState.faucetResult === 'funded' || transientState.faucetResult === 'already-funded' || transientState.faucetResult === 'has-balance';
-  let balance = 0;
-  let isFunded = faucetOK;
-
-  // Check current balance if not already funded via faucet
-  if (!isFunded) {
-    try {
-      const address = await window.bookishWallet?.getAddress?.();
-      if (address) {
-        const balanceResult = await getWalletBalance(address);
-        balance = parseFloat(balanceResult.balanceETH || '0');
-        isFunded = balance >= 0.00002; // MIN_FUNDING_ETH
-      }
-    } catch (e) {
-      console.error('[Bookish:AccountUI] Error checking balance:', e);
-    }
-  }
-
-  // Render content based on funding status
-  let contentHTML;
-  if (isFunded) {
-    // State A: Faucet succeeded or already funded
-    contentHTML = `
-      <div style="text-align:center;padding:20px 0;">
-        <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;">✓</div>
-        <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
-        <p style="font-size:.85rem;line-height:1.6;opacity:.8;margin:0 0 16px 0;">
-          ${protectionMessage}
-        </p>
-        <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;text-align:left;">
-          <div style="font-size:.85rem;line-height:1.5;margin-bottom:4px;">
-            ✓ Cloud backup enabled
-          </div>
-          <div style="font-size:.75rem;opacity:.8;line-height:1.4;margin-bottom:4px;">
-            Your books will sync across devices.
-          </div>
-          ${faucetOK ? '<div style="font-size:.75rem;opacity:.8;line-height:1.4;">You have credit for ~30 books.</div>' : ''}
-        </div>
-        <button id="startAddingBooksBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Start Adding Books →</button>
-        <div style="margin-top:16px;">
-          <button id="viewRecoveryLinkBtn" class="btn-link" style="background:none;border:none;color:#64748b;font-size:.75rem;cursor:pointer;text-decoration:underline;">View recovery phrase in settings</button>
-        </div>
-      </div>
-    `;
-  } else {
-    // State B: Faucet failed or skipped
-    contentHTML = `
-      <div style="text-align:center;padding:20px 0;">
-        <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;">✓</div>
-        <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
-        <p style="font-size:.85rem;line-height:1.6;opacity:.8;margin:0 0 16px 0;">
-          ${protectionMessage}
-        </p>
-        <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;text-align:left;">
-          <div style="font-size:.85rem;line-height:1.5;">
-            💡 Your account is local-only right now.<br>
-            <span style="font-size:.75rem;opacity:.8;">Add funds to enable cloud backup and sync.</span>
-          </div>
-        </div>
-        <button id="addFundsNowBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Enable Cloud Backup →</button>
-        <div style="margin-top:12px;">
-          <button id="skipForNowBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Skip for now</button>
-        </div>
-        <div style="margin-top:16px;">
-          <button id="viewRecoveryLinkBtn" class="btn-link" style="background:none;border:none;color:#64748b;font-size:.75rem;cursor:pointer;text-decoration:underline;">View recovery phrase in settings</button>
-        </div>
-      </div>
-    `;
-  }
-
-  showAccountModal(contentHTML);
-
-  // Set transient state for UI updates
+/**
+ * Frame A6: Full success - everything uploaded to Arweave
+ */
+function showCreationFullSuccess(displayName, email) {
   transientState.justCreated = true;
   transientState.createdTime = Date.now();
   setTimeout(() => { transientState.justCreated = false; uiStatusManager.refresh(); }, 3000);
 
-  // Helper to complete setup and start sync
-  const completeSetup = async () => {
+  showAccountModal(`
+    <div class="modal-content-enter" style="text-align:center;padding:20px 0;">
+      <div class="success-check-animated" style="margin-bottom:16px;">✓</div>
+      <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
+      <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 16px 0;">
+        Your account is ready. Sign in on any device with your email and password.
+      </p>
+      <div class="success-status-list">
+        <div class="status-item"><span class="status-dot"></span> Cloud backup: Active</div>
+        <div class="status-item"><span class="status-dot"></span> Account recovery: On</div>
+        <div class="status-item">📚 Ready to save books!</div>
+      </div>
+      <button id="startBooksBtn" class="btn primary" style="width:100%;padding:14px 20px;">Start Adding Books →</button>
+      <div class="signed-in-as">Signed in as ${email}</div>
+    </div>
+  `);
+
+  document.getElementById('startBooksBtn').onclick = () => {
     closeHelperModal();
     closeAccountModal();
-    // Hide banner after account creation
     const banner = document.getElementById('accountBanner');
     if (banner) banner.style.display = 'none';
     uiStatusManager.refresh();
-    console.log('[Bookish:AccountUI] Account created, starting sync loop');
+    if(window.bookishApp?.render) window.bookishApp.render();
     startSync();
-  };
-
-  // Button handlers - conditional based on funding status
-  if (isFunded) {
-    // Start Adding Books button (funded state)
-    document.getElementById('startAddingBooksBtn').onclick = completeSetup;
-  } else {
-    // Add Funds Now - opens Coinbase onramp (unfunded state)
-    document.getElementById('addFundsNowBtn').onclick = async () => {
-      await completeSetup();
-      // Small delay to let UI settle, then open funding
-      setTimeout(() => handleBuyStorage(), 100);
-    };
-
-    // Skip for now - just closes and continues (unfunded state)
-    document.getElementById('skipForNowBtn').onclick = completeSetup;
-  }
-
-  // View recovery phrase link (always available)
-  document.getElementById('viewRecoveryLinkBtn').onclick = async () => {
-    await completeSetup();
-    setTimeout(() => handleViewSeed(), 100);
   };
 }
 
 /**
- * Store account info in localStorage
+ * Frame A5: Fallback success - faucet failed or skipped
  */
-function storeAccountInfo(account, isPasskey = false) {
-  // Note: Seed is NOT stored here for manual accounts
-  // For passkey accounts, it's encrypted in passkey_protection.js
-  const accountData = {
-    version: isPasskey ? 2 : 1,
-    derivation: isPasskey ? 'prf' : 'manual',
-    created: account.createdAt || Date.now()
+function showCreationFallbackSuccess(displayName, email) {
+  transientState.justCreated = true;
+  transientState.createdTime = Date.now();
+  setTimeout(() => { transientState.justCreated = false; uiStatusManager.refresh(); }, 3000);
+
+  showAccountModal(`
+    <div class="modal-content-enter" style="text-align:center;padding:20px 0;">
+      <div class="success-check-animated" style="margin-bottom:16px;">✓</div>
+      <h3 style="margin:0 0 12px 0;">Account Created, ${displayName}!</h3>
+      <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 16px 0;">
+        Your account works on this device.
+      </p>
+      <div class="info-box">
+        <div style="font-size:.875rem;line-height:1.5;">
+          <span class="info-icon">💡</span> <strong>One more step to sync</strong>
+        </div>
+        <p style="font-size:.8rem;line-height:1.5;color:var(--color-text-secondary);margin:8px 0 0 0;">
+          To sign in on other devices, your account needs to be activated. We'll keep trying in the background.
+        </p>
+      </div>
+      <button id="startBooksBtn" class="btn primary" style="width:100%;padding:14px 20px;">Start Adding Books →</button>
+      <div class="signed-in-as">Signed in as ${email}</div>
+    </div>
+  `);
+
+  document.getElementById('startBooksBtn').onclick = () => {
+    closeHelperModal();
+    closeAccountModal();
+    const banner = document.getElementById('accountBanner');
+    if (banner) banner.style.display = 'none';
+    uiStatusManager.refresh();
+    if(window.bookishApp?.render) window.bookishApp.render();
+    startSync();
   };
-  localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accountData));
+}
+
+// showManualBackupModal removed — no longer part of the auth flow
+
+// onAccountCreated removed — replaced by runAccountCreationFlow
+
+// showSuccessModal removed — replaced by showCreationFullSuccess / showCreationFallbackSuccess
+
+// storeAccountInfo removed — account storage is now handled inline in creation flow
+
+/**
+ * Request escrow encryption from the worker and store pending escrow mapping.
+ * Worker derives keys from (email + ESCROW_MASTER_KEY), encrypts seed, returns
+ * { lookupKey, encryptedPayload }. Client stores this for upload to Arweave.
+ * Same format as credential-mapping — uses the same uploadCredentialMapping function.
+ *
+ * @param {string} seed - User's BIP39 seed phrase
+ * @param {string} email - User's email
+ * @param {string} displayName - User's display name
+ * @returns {Promise<{lookupKey: string, encryptedPayloadB64: string}|null>} - Escrow data or null on failure
+ */
+async function prepareEscrowMapping(seed, email, displayName) {
+  try {
+    console.log('[Bookish:AccountUI] Requesting escrow encryption from worker...');
+
+    const { requestEscrowEncryption } = await import('./core/escrow_client.js');
+    const { lookupKey, encryptedPayload } = await requestEscrowEncryption(email, seed, displayName);
+
+    // Store as pending for Arweave upload (same pattern as pending credential mapping)
+    const pendingEscrow = {
+      lookupKey,
+      encryptedPayloadB64: bytesToBase64(encryptedPayload)
+    };
+    localStorage.setItem(PENDING_ESCROW_MAPPING_KEY, JSON.stringify(pendingEscrow));
+
+    console.log('[Bookish:AccountUI] Escrow mapping prepared, pending Arweave upload');
+    return pendingEscrow;
+  } catch (error) {
+    // Non-fatal: escrow failure shouldn't block account creation
+    console.warn('[Bookish:AccountUI] Escrow preparation failed:', error.message);
+    return null;
+  }
 }
 
 /**
@@ -967,16 +1052,16 @@ async function handleLogin() {
   const accountData = localStorage.getItem(ACCOUNT_STORAGE_KEY);
 
   if (!accountData) {
-    // No local account - try cross-device sign-in
-    handleCrossDeviceSignIn();
+    // No local account - show sign-in form
+    handleSignIn();
     return;
   }
 
   const accountObj = JSON.parse(accountData);
 
-  if (accountObj.version === 2 && accountObj.derivation === 'prf') {
-    // Passkey-protected account - authenticate with passkey
-    handlePasskeyLogin();
+  if (accountObj.derivation === 'credential') {
+    // Credential-based account - show email+password sign-in
+    handleSignIn();
   } else {
     // Manual seed account - require seed entry
     handleManualSeedLogin();
@@ -984,133 +1069,282 @@ async function handleLogin() {
 }
 
 /**
- * Handle passkey login (for local passkey-protected account)
+ * Handle sign-in with email + password (Frame B1-B5)
  */
-async function handlePasskeyLogin() {
-  try {
-    const { seed, credentialId } = await unlockPasskeyProtectedAccount();
+function handleSignIn() {
+  showAccountModal(`
+    <div class="modal-content-enter" style="text-align:center;margin-bottom:16px;">
+      <h3 style="margin:0;">Welcome Back</h3>
+    </div>
 
-    console.log('[Bookish:AccountUI] Account unlocked');
+    <form id="signInForm" class="auth-form" autocomplete="on" novalidate>
+      <div class="form-group">
+        <label for="signInEmail">Email</label>
+        <input type="email" id="signInEmail" autocomplete="email" placeholder="you@example.com" required>
+        <span class="field-preview" id="signInEmailPreview" aria-live="polite"></span>
+      </div>
 
-    // Derive wallet and symmetric key
-    const { address } = await import('./core/account_creation.js').then(m => m.deriveWalletFromSeed(seed));
-    await deriveAndStoreSymmetricKey(seed);
-    await window.bookishWallet.ensure();
-    await storeSessionEncryptedSeed(seed);
+      <div class="form-group">
+        <label for="signInPassword">Password</label>
+        <div class="password-field">
+          <input type="password" id="signInPassword" autocomplete="current-password" placeholder="Your password" required>
+          <button type="button" class="password-toggle" id="toggleSignInPassword" aria-label="Show password">👁</button>
+        </div>
+      </div>
 
-    // Refresh UI state
-    transientState.justSignedIn = true;
-    transientState.signInTime = Date.now();
-    setTimeout(() => { transientState.justSignedIn = false; uiStatusManager.refresh(); }, 3000);
-    uiStatusManager.refresh();
+      <div id="signInError" style="display:none;"></div>
 
-    // Start sync loop now that user is logged in
-    console.log('[Bookish:AccountUI] Passkey login successful, starting sync loop');
-    startSync();
+      <button type="submit" id="signInSubmitBtn" class="btn primary" style="width:100%;padding:14px 20px;" disabled>Sign In</button>
+    </form>
 
-  } catch (error) {
-    console.error('[Bookish:AccountUI] Login failed:', error);
-    uiStatusManager.refresh();
+    <div class="auth-footer">
+      <div>Forgot password? <a href="mailto:support@getbookish.app?subject=Bookish%3A%20Password%20Recovery&body=My%20sign-in%20email%3A%20%0AI%20need%20help%20recovering%20my%20account." id="forgotPasswordLink">Contact us</a></div>
+      <div class="footer-divider">Don't have an account? <button class="link-btn" id="switchToCreate">Create one</button></div>
+    </div>
+  `, true);
+
+  const emailInput = document.getElementById('signInEmail');
+  const passwordInput = document.getElementById('signInPassword');
+  const submitBtn = document.getElementById('signInSubmitBtn');
+  const errorDiv = document.getElementById('signInError');
+
+  // Validate form
+  function validateSignIn() {
+    const emailOk = emailInput.value.trim().length > 0;
+    const passOk = passwordInput.value.length > 0;
+    submitBtn.disabled = !(emailOk && passOk);
   }
+
+  emailInput.addEventListener('input', validateSignIn);
+  passwordInput.addEventListener('input', () => {
+    // Clear error when user types
+    errorDiv.style.display = 'none';
+    validateSignIn();
+  });
+
+  // Email normalization preview
+  emailInput.addEventListener('blur', () => {
+    const val = emailInput.value.trim();
+    const preview = document.getElementById('signInEmailPreview');
+    if (val && isValidEmail(val)) {
+      const normalized = normalizeUsername(val);
+      preview.innerHTML = `<span class="preview-arrow">►</span> Signing in as <strong>${normalized}</strong>`;
+    } else {
+      preview.innerHTML = '';
+    }
+  });
+
+  // Pre-fill mailto link with email
+  emailInput.addEventListener('change', () => {
+    const link = document.getElementById('forgotPasswordLink');
+    if (link && emailInput.value.trim()) {
+      const email = encodeURIComponent(emailInput.value.trim());
+      link.href = `mailto:support@getbookish.app?subject=Bookish%3A%20Password%20Recovery&body=My%20sign-in%20email%3A%20${email}%0AI%20need%20help%20recovering%20my%20account.`;
+    }
+  });
+
+  // Password visibility toggle
+  document.getElementById('toggleSignInPassword').addEventListener('click', () => {
+    const type = passwordInput.type === 'password' ? 'text' : 'password';
+    passwordInput.type = type;
+    document.getElementById('toggleSignInPassword').setAttribute('aria-label', type === 'password' ? 'Show password' : 'Hide password');
+  });
+
+  // Switch to create account
+  document.getElementById('switchToCreate').addEventListener('click', () => {
+    closeHelperModal();
+    handleCreateAccount();
+  });
+
+  // Form submission
+  document.getElementById('signInForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (submitBtn.disabled) return;
+
+    const email = emailInput.value.trim();
+    const password = passwordInput.value;
+
+    // Frame B2: Loading state
+    submitBtn.disabled = true;
+    submitBtn.innerHTML = '<span class="spinner-inline"></span> Signing in...';
+    emailInput.readOnly = true;
+    emailInput.style.opacity = '0.7';
+    passwordInput.readOnly = true;
+    passwordInput.style.opacity = '0.7';
+    errorDiv.style.display = 'none';
+
+    try {
+      await runSignInFlow(email, password);
+    } catch (error) {
+      console.error('[Bookish:AccountUI] Sign-in failed:', error);
+
+      // Restore form state
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Sign In';
+      emailInput.readOnly = false;
+      emailInput.style.opacity = '1';
+      passwordInput.readOnly = false;
+      passwordInput.style.opacity = '1';
+
+      // Show inline error (Frame B4 or B5)
+      const isNetworkError = error.message.includes('Network error') ||
+                             error.message.includes('Failed to fetch') ||
+                             error.message.includes('NetworkError');
+
+      if (isNetworkError) {
+        errorDiv.innerHTML = `
+          <div class="error-box">
+            <span class="error-icon">⚠</span>
+            <span class="error-text">Something went wrong. Check your internet connection and try again.</span>
+          </div>
+        `;
+      } else {
+        errorDiv.innerHTML = `
+          <div class="error-box">
+            <span class="error-icon">⚠</span>
+            <span class="error-text">We couldn't sign you in. Double-check your email and password and try again.</span>
+          </div>
+        `;
+      }
+      errorDiv.style.display = 'block';
+
+      // Focus password field
+      passwordInput.focus();
+    }
+  });
+
+  // Enter key submission
+  [emailInput, passwordInput].forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !submitBtn.disabled) {
+        e.preventDefault();
+        document.getElementById('signInForm').dispatchEvent(new Event('submit'));
+      }
+    });
+  });
 }
 
 /**
- * Handle cross-device sign-in (no local account)
+ * Run the sign-in flow (Frame B2 onwards)
+ * @param {string} email - User email
+ * @param {string} password - User password
  */
-async function handleCrossDeviceSignIn() {
-  try {
-    const result = await signInWithPasskey();
+async function runSignInFlow(email, password) {
+  console.log('[Bookish:AccountUI] Starting email+password sign-in...');
 
-    await deriveAndStoreSymmetricKey(result.seed);
-    await window.bookishWallet.ensure();
-    await storeSessionEncryptedSeed(result.seed);
+  // Step 1: Derive credential keys (PBKDF2 - 0.5-3s)
+  const { lookupKey, encryptionKey } = await deriveCredentialKeys(email, password);
 
-    // Hide banner after login
-    const banner = document.getElementById('accountBanner');
-    if (banner) banner.style.display = 'none';
+  // Step 2: Query Arweave for credential mapping
+  const mapping = await downloadCredentialMapping(lookupKey);
 
-    // Start sync loop now that user is logged in
-    console.log('[Bookish:AccountUI] Login successful, starting sync loop');
-    startSync();
-
-  } catch (error) {
-    console.error('[Bookish:AccountUI] Cross-device sign-in failed:', error);
-
-    // Check if this is an "account not synced" error (unfunded account)
-    const isNotSynced = error.message.includes('No wallet mapping found') ||
-                        error.message.includes('No account metadata found');
-    const isCancelled = error.message.includes('cancelled') || error.message.includes('timed out');
-
-    if (isNotSynced) {
-      // Show helpful "Account Not Synced" modal
-      showAccountModal(`
-        <h3>Account Not Synced Yet</h3>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-          Your account hasn't been backed up to the cloud yet, so it can't be accessed from this device.
-        </p>
-        <div style="background:#1e242b;border:1px solid #334155;border-radius:8px;padding:12px 16px;margin:16px 0;">
-          <div style="font-size:.8rem;font-weight:600;margin-bottom:8px;">What happened?</div>
-          <p style="font-size:.8rem;line-height:1.5;opacity:.8;margin:0;">
-            Your account was created but not funded. Without funds, your data stays on the original device only.
-          </p>
-        </div>
-        <div style="font-size:.875rem;margin:16px 0;">
-          <div style="font-weight:500;margin-bottom:8px;">To fix this:</div>
-          <ol style="margin:0;padding-left:20px;line-height:1.8;opacity:.9;">
-            <li>Go back to your original device</li>
-            <li>Add funds to enable cloud backup</li>
-            <li>Then you can sign in anywhere</li>
-          </ol>
-        </div>
-        <p style="font-size:.875rem;opacity:.9;margin:16px 0;">
-          Or, if you have your recovery phrase:
-        </p>
-        <button id="signInWithRecoveryBtn" class="btn" style="width:100%;padding:12px 20px;background:#2563eb;margin-bottom:12px;">Sign in with Recovery Phrase</button>
-        <div style="text-align:center;">
-          <button id="closeErrorBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Close</button>
-        </div>
-      `);
-
-      document.getElementById('signInWithRecoveryBtn').onclick = () => {
-        closeAccountModal();
-        handleManualSeedLogin();
-      };
-      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
-    } else if (isCancelled) {
-      // Show simple retry message for cancelled/timed out
-      showAccountModal(`
-        <h3>Sign-In Cancelled</h3>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-          The security prompt closed. Let's try again when you're ready.
-        </p>
-        <div style="text-align:center;margin:24px 0;">
-          <button id="retrySignInBtn" class="btn" style="margin-right:12px;">Try Again</button>
-          <button id="closeErrorBtn" class="btn secondary">Cancel</button>
-        </div>
-      `);
-
-      document.getElementById('retrySignInBtn').onclick = () => {
-        closeAccountModal();
-        handleCrossDeviceSignIn();
-      };
-      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
-    } else {
-      // Generic error
-      showAccountModal(`
-        <h3>Sign-In Failed</h3>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-          ${error.message}
-        </p>
-        <div style="text-align:center;margin:24px 0;">
-          <button id="closeErrorBtn" class="btn">OK</button>
-        </div>
-      `);
-
-      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
-    }
-
-    uiStatusManager.refresh();
+  if (!mapping) {
+    throw new Error('No account found for these credentials');
   }
+
+  // Step 3: Decrypt credential payload (seed + metadata)
+  const credentialPayload = await decryptCredentialPayload(mapping.encryptedPayload, encryptionKey);
+  const seed = credentialPayload.seed;
+  console.log('[Bookish:AccountUI] Credential payload decrypted successfully');
+
+  // Step 4: Restore local state
+  const { deriveWalletFromSeed } = await import('./core/account_creation.js');
+  const { address } = await deriveWalletFromSeed(seed);
+  console.log('[Bookish:AccountUI] Wallet address:', address);
+
+  await deriveAndStoreSymmetricKey(seed);
+  await window.bookishWallet.ensure();
+  await storeSessionEncryptedSeed(seed);
+
+  // Step 5: Download account metadata
+  const symKeyHex = localStorage.getItem('bookish.sym');
+  const symKeyBytes = hexToBytes(symKeyHex);
+  const symKey = await importAesKey(symKeyBytes);
+
+  let displayName = credentialPayload.displayName || 'Bookish User';
+  let createdAt = credentialPayload.createdAt || Date.now();
+
+  try {
+    const metadata = await downloadAccountMetadata(address, symKey);
+    if (metadata) {
+      displayName = metadata.displayName || displayName;
+      createdAt = metadata.createdAt || createdAt;
+    }
+  } catch (metaErr) {
+    console.warn('[Bookish:AccountUI] Could not download account metadata:', metaErr);
+  }
+
+  // Store account info
+  const normalizedEmail = normalizeUsername(email);
+  const accountData = {
+    version: 2,
+    derivation: 'credential',
+    displayName,
+    email: normalizedEmail,
+    created: createdAt,
+    arweaveTxId: 'restored',
+    persistedAt: createdAt
+  };
+  localStorage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(accountData));
+
+  // Store credential metadata
+  localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify({
+    lookupKey,
+    hasEscrow: true // Assume true since they have an Arweave mapping
+  }));
+
+  console.log('[Bookish:AccountUI] Sign-in complete, local state restored');
+
+  // Frame B3: Success - close modal, show toast
+  closeHelperModal();
+  closeAccountModal();
+
+  // Hide banner
+  const banner = document.getElementById('accountBanner');
+  if (banner) banner.style.display = 'none';
+
+  // Show welcome toast
+  showToast(`✓ Welcome back, ${displayName}!`);
+
+  // Set transient state
+  transientState.justSignedIn = true;
+  transientState.signInTime = Date.now();
+  setTimeout(() => { transientState.justSignedIn = false; uiStatusManager.refresh(); }, 3000);
+
+  uiStatusManager.refresh();
+  // Trigger render immediately so "Syncing your books…" loading state shows
+  if(window.bookishApp?.render) window.bookishApp.render();
+  startSync();
+}
+
+/**
+ * Show a temporary toast notification
+ * @param {string} message - Toast message
+ * @param {number} duration - Duration in ms (default 3000)
+ */
+function showToast(message, duration = 3000) {
+  // Remove existing toast if any
+  const existing = document.getElementById('bookishToast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.id = 'bookishToast';
+  toast.style.cssText = `
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--color-bg-elevated, #1e293b); color: var(--color-text-primary, #e2e8f0);
+    border: 1px solid var(--color-success, #10b981); border-left: 4px solid var(--color-success, #10b981);
+    padding: 12px 20px; border-radius: 8px; font-size: 0.875rem;
+    z-index: 10000; animation: contentFadeIn 0.2s ease-out;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  `;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transition = 'opacity 0.3s ease';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
 }
 
 /**
@@ -1124,7 +1358,7 @@ function handleManualSeedLogin() {
     </p>
     <textarea id="manualSeedInput" style="width:100%;min-height:100px;font-family:monospace;padding:12px;background:#0b1220;border:1px solid #334155;border-radius:6px;color:#fff;" placeholder="word1 word2 word3 ..."></textarea>
     <div style="text-align:center;margin:24px 0;">
-      <button id="confirmManualLoginBtn" class="btn">Log In with Recovery Phrase</button>
+      <button id="confirmManualLoginBtn" class="btn">Sign In with Recovery Phrase</button>
     </div>
     <div id="manualLoginStatus" style="margin-top:12px;font-size:.85rem;text-align:center;"></div>
   `);
@@ -1182,6 +1416,8 @@ function handleManualSeedLogin() {
 
       // Start sync loop now that user is logged in
       console.log('[Bookish:AccountUI] Manual seed login successful, starting sync loop');
+      // Trigger render immediately so "Syncing your books…" loading state shows
+      if(window.bookishApp?.render) window.bookishApp.render();
       startSync();
 
       setTimeout(() => {
@@ -1195,7 +1431,7 @@ function handleManualSeedLogin() {
       console.error('[Bookish:AccountUI] Manual login failed:', error);
       statusDiv.innerHTML = `<span style="color:#ef4444;">Error: ${error.message}</span>`;
       btn.disabled = false;
-      btn.textContent = 'Log In with Recovery Phrase';
+      btn.textContent = 'Sign In with Recovery Phrase';
     }
   };
 }
@@ -1228,7 +1464,7 @@ async function handleLogout() {
       </p>
       <div style="background:#2d1f1f;border:1px solid #7f1d1d;border-radius:8px;padding:12px 16px;margin:16px 0;">
         <div style="font-size:.85rem;line-height:1.7;">
-          ${hasUnsyncedAccount ? '<div>❌ You won\'t be able to sign back in with passkey</div>' : ''}
+          ${hasUnsyncedAccount ? '<div>❌ You won\'t be able to sign back in on other devices</div>' : ''}
           <div>❌ ${unsyncedBooks > 0 ? `${unsyncedBooks} book${unsyncedBooks > 1 ? 's' : ''} will be lost` : 'Your books will be lost'} unless you have your recovery phrase saved</div>
         </div>
       </div>
@@ -1239,7 +1475,7 @@ async function handleLogout() {
       <button id="haveRecoveryPhraseBtn" class="btn secondary" style="width:100%;padding:12px 20px;margin-bottom:16px;">I have my recovery phrase saved</button>
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <button id="cancelLogoutBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Cancel</button>
-        <button id="logoutWithoutSavingBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Log out without saving</button>
+        <button id="logoutWithoutSavingBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Sign out without saving</button>
       </div>
     `);
 
@@ -1266,8 +1502,24 @@ async function handleLogout() {
     return;
   }
 
-  // No unsynced data, log out immediately
-  performLogout();
+  // Account is synced — still confirm before logging out
+  showAccountModal(`
+    <div style="text-align:center;padding:20px 0;">
+      <h3 style="margin:0 0 16px 0;">Sign Out?</h3>
+      <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 20px 0;">
+        You can sign back in anytime with your email and password.
+      </p>
+      <button id="confirmLogoutBtn" class="btn primary" style="width:100%;padding:14px 20px;margin-bottom:12px;">Sign Out</button>
+      <button id="cancelLogoutBtn" class="btn secondary" style="width:100%;padding:12px 20px;">Cancel</button>
+    </div>
+  `);
+
+  document.getElementById('confirmLogoutBtn').onclick = () => {
+    closeHelperModal();
+    performLogout();
+  };
+
+  document.getElementById('cancelLogoutBtn').onclick = closeHelperModal;
 }
 
 /**
@@ -1308,64 +1560,24 @@ async function performLogout() {
  * NOTE: Does NOT close account modal - opens recovery phrase view on top
  */
 async function handleViewSeed() {
-  if (isPasskeyProtected()) {
-    // Try to get seed from session storage first (already decrypted)
-    try {
-      let seed = await getSessionEncryptedSeed();
-
-      if (seed) {
-        console.log('[Bookish:AccountUI] Using session-encrypted seed');
-        showSeedPhraseModal(seed);
-        return;
-      }
-
-      // No session seed, try cached PRF key to decrypt from storage
-      const cachedPRFKey = await getPRFKey();
-
-      if (cachedPRFKey) {
-        console.log('[Bookish:AccountUI] Using cached PRF key to decrypt seed');
-        const accountData = JSON.parse(localStorage.getItem(ACCOUNT_STORAGE_KEY));
-        const encryptedData = Uint8Array.from(atob(accountData.enc), c => c.charCodeAt(0));
-        const decrypted = await crypto.subtle.decrypt(
-          { name: 'AES-GCM', iv: encryptedData.slice(0, 12) },
-          cachedPRFKey,
-          encryptedData.slice(12)
-        );
-        seed = new TextDecoder().decode(decrypted);
-        showSeedPhraseModal(seed);
-        return;
-      }
-
-      // No cached key, authenticate with passkey
-      console.log('[Bookish:AccountUI] No cached PRF key, authenticating with passkey');
-      const result = await unlockPasskeyProtectedAccount();
-      showSeedPhraseModal(result.seed);
-
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Failed to unlock seed:', error);
-      uiStatusManager.refresh();
+  try {
+    const seed = await getSessionEncryptedSeed();
+    if (seed) {
+      showSeedPhraseModal(seed);
+    } else {
+      showAccountModal(`
+        <h3>View Recovery Phrase</h3>
+        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
+          Your recovery phrase is only stored in memory during this session. Please sign in again to view it.
+        </p>
+        <div style="text-align:center;margin:24px 0;">
+          <button onclick="window.accountUI.closeHelperModal()" class="btn">Close</button>
+        </div>
+      `);
     }
-  } else {
-    // Manual seed account - retrieve from session storage
-    try {
-      const seed = await getSessionEncryptedSeed();
-      if (seed) {
-        showSeedPhraseModal(seed);
-      } else {
-        showAccountModal(`
-          <h3>View Recovery Phrase</h3>
-          <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-            Your recovery phrase is only stored in memory during this session. Please log in again to view it.
-          </p>
-          <div style="text-align:center;margin:24px 0;">
-            <button onclick="window.accountUI.closeHelperModal()" class="btn">Close</button>
-          </div>
-        `);
-      }
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Failed to retrieve manual seed:', error);
-      uiStatusManager.refresh();
-    }
+  } catch (error) {
+    console.error('[Bookish:AccountUI] Failed to retrieve seed:', error);
+    uiStatusManager.refresh();
   }
 }
 
@@ -1377,13 +1589,22 @@ function showSeedPhraseModal(seed) {
 
   showAccountModal(`
     <h3>Your Recovery Phrase</h3>
-    <div style="background:#f59e0b1a;border:1px solid #f59e0b;border-radius:6px;padding:16px;margin:16px 0;">
-      <p style="font-size:.875rem;line-height:1.6;color:#f59e0b;margin:0;">
-        <strong>Keep this private and secure.</strong> Anyone with this recovery phrase can access your account.
+    <div style="background:#4a90e21a;border:1px solid #4a90e2;border-radius:6px;padding:16px;margin:16px 0;">
+      <p style="font-size:.875rem;line-height:1.6;color:#93c5fd;margin:0;">
+        Your recovery phrase is a master key to your account. If you ever forget your email or password and can't reach us for help, you can use these 12 words to regain access on any device.
+      </p>
+      <p style="font-size:.8rem;line-height:1.5;color:#93c5fd;margin:10px 0 0 0;opacity:.85;">
+        Most users won't need this — you can always sign in with your email and password, and we can help if you forget.
       </p>
     </div>
 
-    <div style="background:#0b1220;border:1px solid #334155;border-radius:6px;padding:16px;margin:16px 0;">
+    <div style="background:#f59e0b1a;border:1px solid #f59e0b;border-radius:6px;padding:12px 16px;margin:0 0 16px 0;">
+      <p style="font-size:.8rem;line-height:1.5;color:#f59e0b;margin:0;">
+        <strong>Keep this private and secure.</strong> Anyone with these words can access your account.
+      </p>
+    </div>
+
+    <div style="background:#0b1220;border:1px solid #334155;border-radius:6px;padding:16px;margin:0 0 16px 0;">
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-family:monospace;font-size:.875rem;">
         ${words.map((word, i) => `
           <div style="display:flex;gap:8px;">
@@ -1415,134 +1636,7 @@ function showSeedPhraseModal(seed) {
   document.getElementById('closeSeedBtn').onclick = closeHelperModal;
 }
 
-/**
- * Handle adding passkey protection to manual account
- */
-async function handleAddPasskey() {
-  // Try to get seed from session storage first (user is already logged in)
-  const sessionSeed = await getSessionEncryptedSeed();
-
-  if (sessionSeed) {
-    // User is logged in, seed is available - trigger passkey creation immediately
-    try {
-      // Get display name from existing account data
-      const accountData = JSON.parse(localStorage.getItem(ACCOUNT_STORAGE_KEY) || '{}');
-      const displayName = accountData.displayName || 'User';
-
-      // Protect account with passkey using the session seed - this will show browser's passkey dialog
-      const result = await protectAccountWithPasskey(sessionSeed, `Bookish: ${displayName}`);
-      console.log('[Bookish:AccountUI] protectAccountWithPasskey returned credentialId:', result.credentialId);
-
-      uiStatusManager.refresh();
-
-      // UI will refresh when modal is reopened
-
-      // Trigger persistence check (will auto-persist if funded)
-      if (window.bookishSyncManager?.triggerPersistenceCheck) {
-        window.bookishSyncManager.triggerPersistenceCheck();
-      }
-
-    } catch (error) {
-      console.error('[Bookish:AccountUI] Failed to add passkey:', error);
-
-      // Show user-friendly error modal
-      showAccountModal(`
-        <h3>Passkey Setup Timed Out</h3>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-          The passkey creation window closed or timed out. This can happen if you wait too long to complete the authentication.
-        </p>
-        <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-          <strong>Please try again</strong> and complete the passkey prompt quickly when it appears.
-        </p>
-        <div style="margin-top:24px;">
-          <button id="closeErrorBtn" class="btn" style="width:100%;">OK</button>
-        </div>
-      `);
-      document.getElementById('closeErrorBtn').onclick = closeHelperModal;
-    }
-  } else {
-    // User is not logged in or seed not in session - ask for seed phrase
-    showAccountModal(`
-      <h3>Protect with Passkey</h3>
-      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:16px 0;">
-        Enter your 12-word recovery phrase to enable passkey protection. This will allow you to recover your account on other devices.
-      </p>
-
-      <div style="margin:16px 0;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-          <label style="font-size:.875rem;opacity:.9;">Recovery Phrase (12 words)</label>
-          <button id="pasteSeedBtn" class="btn secondary" style="padding:4px 8px;font-size:.75rem;">Paste</button>
-        </div>
-        <textarea id="seedInput" rows="3" style="width:100%;padding:12px;background:#0b1220;border:1px solid #334155;border-radius:6px;color:#e2e8f0;font-family:monospace;font-size:.875rem;resize:vertical;"></textarea>
-      </div>
-
-      <div id="addPasskeyStatus" style="margin:12px 0;font-size:.875rem;text-align:center;"></div>
-
-      <div style="display:flex;gap:12px;margin-top:24px;">
-        <button id="cancelAddPasskeyBtn" class="btn secondary" style="flex:1;">Cancel</button>
-        <button id="confirmAddPasskeyBtn" class="btn" style="flex:1;">Enable Passkey</button>
-      </div>
-    `);
-
-    document.getElementById('cancelAddPasskeyBtn').onclick = closeHelperModal;
-    document.getElementById('pasteSeedBtn').onclick = async () => {
-      try {
-        const text = await navigator.clipboard.readText();
-        document.getElementById('seedInput').value = text;
-      } catch (error) {
-        console.error('[Bookish:AccountUI] Paste failed:', error);
-      }
-    };
-    document.getElementById('confirmAddPasskeyBtn').onclick = async () => {
-      const seedInput = document.getElementById('seedInput').value.trim().toLowerCase();
-      const statusDiv = document.getElementById('addPasskeyStatus');
-
-      // Validate seed format
-      const words = seedInput.split(/\s+/);
-      if (words.length !== 12) {
-        statusDiv.innerHTML = '<span style="color:#ef4444;">Recovery phrase must be exactly 12 words</span>';
-        return;
-      }
-
-      try {
-        statusDiv.textContent = 'Verifying seed...';
-
-        // Verify the entered seed matches by comparing derived symmetric keys
-        const existingSymKey = localStorage.getItem('bookish.sym');
-        if (existingSymKey) {
-          const derivedSymKey = await deriveAndStoreSymmetricKey(seedInput);
-          if (derivedSymKey !== existingSymKey) {
-            statusDiv.innerHTML = '<span style="color:#ef4444;">Recovery phrase does not match your account</span>';
-            // Restore the correct symKey
-            localStorage.setItem('bookish.sym', existingSymKey);
-            return;
-          }
-        }
-
-        await storeSessionEncryptedSeed(seedInput);
-
-        statusDiv.textContent = 'Creating passkey...';
-
-        // Get display name from existing account data
-        const accountData = JSON.parse(localStorage.getItem(ACCOUNT_STORAGE_KEY) || '{}');
-        const displayName = accountData.displayName || 'User';
-
-        // Protect account with passkey
-        const result = await protectAccountWithPasskey(seedInput, `Bookish: ${displayName}`);
-        console.log('[Bookish:AccountUI] protectAccountWithPasskey returned credentialId:', result.credentialId);
-
-        closeAccountModal();
-        uiStatusManager.refresh();
-
-        // UI will refresh when modal is reopened
-
-      } catch (error) {
-        console.error('[Bookish:AccountUI] Failed to add passkey protection:', error);
-        statusDiv.innerHTML = `<span style="color:#ef4444;">${error.message}</span>`;
-      }
-    };
-  }
-}
+// handleAddPasskey removed — passkey no longer supported
 
 /**
  * Handle "Buy with Transak" button click - shows coming soon message
@@ -1572,40 +1666,33 @@ function showFundingValueModal(address, isFunded = false) {
   let advancedExpanded = false;
 
   // Adapt messaging based on funding status
-  const title = isFunded ? 'Add More Credit' : 'Make Your Books Permanent';
-  const icon = isFunded ? '💰 → ☁️' : '☁️ + 🔒 = ♾️';
-  const introText = isFunded
-    ? 'You have some credit, but need more to back up all your books.'
-    : 'Right now, your books only exist on this device. Enable cloud backup to:';
-  const costLabel = isFunded ? 'Recommended: ~$5' : 'One-time cost: ~$5';
+  const title = isFunded ? 'Add Credit' : 'Make Your Books Permanent';
   const paymentPrompt = isFunded ? 'How would you like to add credit?' : 'How would you like to pay?';
 
   showAccountModal(`
     <div style="text-align:center;padding:20px 0;">
       <h3 style="margin:0 0 16px 0;">${title}</h3>
-      <div style="font-size:2.5rem;margin:16px 0;opacity:.9;">${icon}</div>
-      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;text-align:left;">
-        ${introText}
-      </p>
       ${!isFunded ? `
+      <div style="font-size:2.5rem;margin:16px 0;opacity:.9;">☁️ + 🔒 = ♾️</div>
+      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;text-align:left;">
+        Right now, your books only exist on this device. Enable cloud backup to:
+      </p>
       <div style="text-align:left;margin:0 0 24px 0;">
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Access from any device</div>
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Never lose your reading history</div>
         <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Keep your data forever</div>
       </div>
-      ` : `
-      <div style="text-align:left;margin:0 0 24px 0;">
-        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Back up all your books</div>
-        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Keep them synced across devices</div>
-        <div style="font-size:.875rem;line-height:2;margin:8px 0;">✓ Ensure permanent storage</div>
-      </div>
-      `}
       <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;">
         <div style="font-size:.85rem;line-height:1.5;">
-          <strong>${costLabel}</strong><br>
+          <strong>One-time cost: ~$5</strong><br>
           <span style="opacity:.8;">(covers years of storage)</span>
         </div>
       </div>
+      ` : `
+      <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;text-align:left;">
+        Add funds to keep your books backed up. Your balance covers storage for years — a little goes a long way.
+      </p>
+      `}
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 16px 0;">${paymentPrompt}</p>
       <button id="payWithCoinbaseBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;margin-bottom:12px;">Pay with Coinbase</button>
       <button id="payWithCardBtn" class="btn secondary" style="width:100%;padding:12px 20px;margin-bottom:12px;opacity:.6;cursor:not-allowed;" disabled>Pay with Card (Coming Soon)</button>
@@ -1663,8 +1750,9 @@ function showFundingValueModal(address, isFunded = false) {
     }
   };
 
-  // Maybe Later
+  // Maybe Later — close the helper modal (funding dialog) and the account modal behind it
   document.getElementById('maybeLaterBtn').onclick = () => {
+    closeHelperModal();
     closeAccountModal();
   };
 }
@@ -1982,26 +2070,17 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
 
     const accountObj = JSON.parse(accountData);
 
-    // Get seed from session storage (no passkey prompt needed)
+    // Get seed from session storage
     let seed = await getSessionEncryptedSeed();
     if (!seed) {
-      // Fallback: Try unlocking with passkey if session seed not available
-      if (isPasskeyProtected()) {
-        console.log('[Bookish:AccountUI] Session seed not available, prompting for passkey...');
-        const result = await unlockPasskeyProtectedAccount();
-        seed = result.seed;
-        // Store for future use in this session
-        await storeSessionEncryptedSeed(seed);
-      } else {
-        // Manual account: Get seed from localStorage
-        const { MANUAL_SEED_STORAGE_KEY } = await import('./core/storage_constants.js');
-        seed = localStorage.getItem(MANUAL_SEED_STORAGE_KEY);
-        if (!seed) {
-          throw new Error('Manual seed not found in storage');
-        }
-        // Store in session for future operations
-        await storeSessionEncryptedSeed(seed);
+      // Fallback: Get seed from localStorage (manual accounts)
+      const { MANUAL_SEED_STORAGE_KEY } = await import('./core/storage_constants.js');
+      seed = localStorage.getItem(MANUAL_SEED_STORAGE_KEY);
+      if (!seed) {
+        throw new Error('Seed not found in storage');
       }
+      // Store in session for future operations
+      await storeSessionEncryptedSeed(seed);
     }
 
     // Derive wallet address
@@ -2016,11 +2095,8 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
     const symKeyBytes = hexToBytes(symKeyHex);
     const symKey = await crypto.subtle.importKey('raw', symKeyBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 
-    // Get passkey metadata (needed for display name and later for mapping upload)
-    const passkeyMeta = getPasskeyMetadata();
-
     // Get display name from account data
-    const displayName = accountObj.displayName || passkeyMeta?.userDisplayName || 'User';
+    const displayName = accountObj.displayName || 'User';
 
     // Upload account metadata (profile only, NO SEED)
     const accountTxId = await uploadAccountMetadata({
@@ -2032,36 +2108,62 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
 
     console.log('[Bookish:AccountUI] Account metadata uploaded:', accountTxId);
 
-    // If passkey account, also upload mapping with encrypted seed
+    // Upload credential mapping to Arweave
     let mappingTxId = null;
 
-    if (passkeyMeta?.credentialId) {
-      console.log('[Bookish:AccountUI] Uploading passkey mapping with encrypted seed...');
-
-      // Get PRF key for encrypting seed (check cache first to avoid passkey prompt)
-      const { getPRFKey } = await import('./core/crypto_core.js');
-      let encryptionKey = await getPRFKey();
-
-      if (!encryptionKey) {
-        console.log('[Bookish:AccountUI] PRF key not cached, authenticating...');
-        const { authenticateWithPRF } = await import('./core/passkey_core.js');
-        const result = await authenticateWithPRF();
-        encryptionKey = result.encryptionKey;
-
-        // Cache for future use
-        const { storePRFKey } = await import('./core/crypto_core.js');
-        await storePRFKey(encryptionKey);
+    if (accountObj.derivation === 'credential') {
+      // Credential-based account: upload credential mapping if pending
+      const pendingRaw = localStorage.getItem(PENDING_CREDENTIAL_MAPPING_KEY);
+      if (pendingRaw) {
+        try {
+          const pending = JSON.parse(pendingRaw);
+          if (pending.lookupKey && pending.encryptedPayloadB64) {
+            console.log('[Bookish:AccountUI] Uploading pending credential mapping...');
+            const encryptedPayload = base64ToBytes(pending.encryptedPayloadB64);
+            mappingTxId = await uploadCredentialMapping({
+              lookupKey: pending.lookupKey,
+              encryptedPayload
+            });
+            console.log('[Bookish:AccountUI] Credential mapping uploaded:', mappingTxId);
+            localStorage.removeItem(PENDING_CREDENTIAL_MAPPING_KEY);
+          }
+        } catch (parseErr) {
+          console.error('[Bookish:AccountUI] Failed to parse pending credential mapping:', parseErr);
+          localStorage.removeItem(PENDING_CREDENTIAL_MAPPING_KEY);
+        }
       }
 
-      mappingTxId = await uploadPasskeyMapping(passkeyMeta.credentialId, seed, encryptionKey);
-      console.log('[Bookish:AccountUI] Passkey mapping uploaded:', mappingTxId);
+      // Upload pending escrow mapping to Arweave (same format as credential-mapping)
+      const pendingEscrowRaw = localStorage.getItem(PENDING_ESCROW_MAPPING_KEY);
+      if (pendingEscrowRaw) {
+        try {
+          const pendingEscrow = JSON.parse(pendingEscrowRaw);
+          if (pendingEscrow.lookupKey && pendingEscrow.encryptedPayloadB64) {
+            console.log('[Bookish:AccountUI] Uploading pending escrow mapping...');
+            const escrowPayload = base64ToBytes(pendingEscrow.encryptedPayloadB64);
+            const escrowTxId = await uploadCredentialMapping({
+              lookupKey: pendingEscrow.lookupKey,
+              encryptedPayload: escrowPayload
+            });
+            console.log('[Bookish:AccountUI] Escrow mapping uploaded:', escrowTxId);
+            localStorage.removeItem(PENDING_ESCROW_MAPPING_KEY);
+
+            const credStore = JSON.parse(localStorage.getItem(CREDENTIAL_STORAGE_KEY) || '{}');
+            credStore.hasEscrow = true;
+            credStore.escrowTxId = escrowTxId;
+            localStorage.setItem(CREDENTIAL_STORAGE_KEY, JSON.stringify(credStore));
+          }
+        } catch (escrowErr) {
+          console.warn('[Bookish:AccountUI] Escrow mapping upload failed (non-fatal):', escrowErr);
+        }
+      }
     }
 
     // Update account storage with tx IDs
     accountObj.arweaveTxId = accountTxId;
     accountObj.persistedAt = Date.now();
     if (mappingTxId) {
-      accountObj.passkeyMappingTxId = mappingTxId;
+      accountObj.credentialMappingTxId = mappingTxId;
     }
 
     // Phase 3: Update progress to "setting-up" state
@@ -2159,7 +2261,7 @@ function getPersistenceIndicatorHTML(state) {
   const titles = {
     local: 'Account stored locally only',
     syncing: 'Syncing to Arweave...',
-    confirmed: 'Backed up on Arweave'
+    confirmed: 'Saved to Arweave'
   };
   const cls = classes[state] || 'local';
   const title = titles[state] || titles.local;
@@ -2261,7 +2363,7 @@ function showAccountModal(content, showClose = true) {
 
   helperModal.innerHTML = `
     <div class="modal-content">
-      ${showClose ? '<button class="modal-close" onclick="window.accountUI.closeHelperModal()">×</button>' : ''}
+      ${showClose ? '<button class="modal-close-btn" onclick="window.accountUI.closeHelperModal()" aria-label="Close">×</button>' : ''}
       ${content}
     </div>
   `;
@@ -2280,7 +2382,8 @@ window.accountUI = {
   closeAccountModal,
   closeHelperModal,
   handlePersistAccountToArweave,
-  updateBalanceDisplay
+  updateBalanceDisplay,
+  handleSignIn
 };
 
 // Note: initAccountUI() is called from app.js — no auto-init here to avoid double initialization
