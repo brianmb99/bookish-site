@@ -64,18 +64,162 @@ const celebrationToast = document.getElementById('celebrationToast');
 const accountNudgeBanner = document.getElementById('accountNudgeBanner');
 const nudgeDismissBtn = document.getElementById('nudgeDismissBtn');
 const nudgeCreateAccountBtn = document.getElementById('nudgeCreateAccountBtn');
+// --- Optional fields (Tap to Track) ---
+const optFieldsZone = document.getElementById('optionalFieldsZone');
+const fieldChipsEl = document.getElementById('fieldChips');
+const starRatingEl = document.getElementById('starRating');
+const ratingInput = document.getElementById('ratingInput');
+const ownedToggle = document.getElementById('ownedToggle');
+const ownedLabel = document.getElementById('ownedLabel');
+const tagsInputEl = document.getElementById('tagsInput');
+const tagsPillsEl = document.getElementById('tagsPills');
+const OPT_FIELDS_KEY = 'bookish_active_fields';
+const OPTIONAL_FIELDS = ['notes','rating','owned','tags'];
+
+function getActiveFields(){ try{ return JSON.parse(localStorage.getItem(OPT_FIELDS_KEY))||[]; }catch{ return []; } }
+function setActiveFields(list){ localStorage.setItem(OPT_FIELDS_KEY, JSON.stringify(list)); }
+function activateField(name){
+  const list=getActiveFields(); if(!list.includes(name)) list.push(name); setActiveFields(list);
+  showOptionalField(name, true);
+}
+function deactivateField(name){
+  const list=getActiveFields().filter(f=>f!==name); setActiveFields(list);
+  showOptionalField(name, false);
+}
+function showOptionalField(name, show){
+  const chip=fieldChipsEl?.querySelector(`.field-chip[data-field="${name}"]`);
+  const field=optFieldsZone?.querySelector(`.optional-field[data-field="${name}"]`);
+  if(chip) chip.style.display=show?'none':'inline-flex';
+  if(field) field.style.display=show?'block':'none';
+}
+function initOptionalFields(entry){
+  const active=getActiveFields();
+  OPTIONAL_FIELDS.forEach(name=>{
+    const hasData = entry && ((name==='notes' && entry.notes) || (name==='rating' && entry.rating) || (name==='owned' && entry.owned) || (name==='tags' && entry.tags));
+    showOptionalField(name, active.includes(name)||!!hasData);
+  });
+}
+function resetOptionalFields(){
+  if(ratingInput){ ratingInput.value=''; updateStarDisplay(0); }
+  if(ownedToggle){ ownedToggle.checked=false; if(ownedLabel) ownedLabel.textContent='No'; }
+  if(tagsInputEl){ tagsInputEl.value=''; }
+  if(tagsPillsEl){ tagsPillsEl.innerHTML=''; }
+}
+function populateOptionalFields(entry){
+  resetOptionalFields();
+  if(!entry) return;
+  if(entry.rating){ ratingInput.value=entry.rating; updateStarDisplay(entry.rating); }
+  if(entry.owned){ ownedToggle.checked=true; if(ownedLabel) ownedLabel.textContent='Yes'; }
+  if(entry.tags){
+    tagsInputEl.value='';
+    tagsPillsEl.innerHTML='';
+    entry.tags.split(',').map(t=>t.trim()).filter(Boolean).forEach(t=>addTagPill(t));
+  }
+}
+function getOptionalFieldValues(){
+  const vals={};
+  const r=parseInt(ratingInput?.value);
+  if(r>=1&&r<=5) vals.rating=r;
+  if(ownedToggle?.checked) vals.owned=true;
+  const tags=collectTags();
+  if(tags) vals.tags=tags;
+  return vals;
+}
+function collectTags(){
+  const pills=[...tagsPillsEl.querySelectorAll('.tag-pill')].map(p=>p.dataset.tag);
+  const pending=(tagsInputEl?.value||'').split(',').map(t=>t.trim()).filter(Boolean);
+  const all=[...new Set([...pills,...pending])];
+  return all.join(', ');
+}
+
+// Star rating interaction
+function updateStarDisplay(val){
+  if(!starRatingEl) return;
+  starRatingEl.querySelectorAll('.star').forEach(s=>{
+    const v=parseInt(s.dataset.value);
+    s.textContent=v<=val?'★':'☆';
+    s.classList.toggle('filled',v<=val);
+    s.setAttribute('aria-checked',v===val?'true':'false');
+  });
+}
+starRatingEl?.addEventListener('click',e=>{
+  const star=e.target.closest('.star');
+  if(!star) return;
+  const val=parseInt(star.dataset.value);
+  const cur=parseInt(ratingInput.value)||0;
+  const newVal=(val===cur)?0:val;
+  ratingInput.value=newVal||'';
+  updateStarDisplay(newVal);
+  if(newVal>0) activateField('rating');
+  updateDirty();
+});
+
+// Owned toggle interaction
+ownedToggle?.addEventListener('change',()=>{
+  if(ownedLabel) ownedLabel.textContent=ownedToggle.checked?'Yes':'No';
+  if(ownedToggle.checked) activateField('owned');
+  updateDirty();
+});
+
+// Tags interaction
+function addTagPill(text){
+  const tag=text.trim();
+  if(!tag) return;
+  const existing=[...tagsPillsEl.querySelectorAll('.tag-pill')].map(p=>p.dataset.tag.toLowerCase());
+  if(existing.includes(tag.toLowerCase())) return;
+  const pill=document.createElement('span');
+  pill.className='tag-pill';
+  pill.dataset.tag=tag;
+  pill.innerHTML=`${escapeHtml(tag)}<button type="button" class="tag-pill-remove" aria-label="Remove tag ${escapeHtml(tag)}">&times;</button>`;
+  pill.querySelector('.tag-pill-remove').addEventListener('click',()=>{ pill.remove(); updateDirty(); });
+  tagsPillsEl.appendChild(pill);
+}
+tagsInputEl?.addEventListener('keydown',e=>{
+  if(e.key==='Enter'||e.key===','){
+    e.preventDefault();
+    const parts=tagsInputEl.value.split(',').map(t=>t.trim()).filter(Boolean);
+    parts.forEach(t=>addTagPill(t));
+    tagsInputEl.value='';
+    if(parts.length) activateField('tags');
+    updateDirty();
+  }
+});
+tagsInputEl?.addEventListener('blur',()=>{
+  const parts=tagsInputEl.value.split(',').map(t=>t.trim()).filter(Boolean);
+  if(parts.length){ parts.forEach(t=>addTagPill(t)); tagsInputEl.value=''; activateField('tags'); updateDirty(); }
+});
+
+// Chip click → activate field
+fieldChipsEl?.addEventListener('click',e=>{
+  const chip=e.target.closest('.field-chip');
+  if(!chip) return;
+  activateField(chip.dataset.field);
+  updateDirty();
+});
+// Deactivate field
+optFieldsZone?.addEventListener('click',e=>{
+  const btn=e.target.closest('.field-deactivate');
+  if(!btn) return;
+  deactivateField(btn.dataset.field);
+  updateDirty();
+});
+
 if(tileCoverClick && coverFileInput){ tileCoverClick.addEventListener('click',(e)=>{ if(e.target.closest('.cover-remove-btn')) return; coverFileInput.click(); }); }
 if(coverRemoveBtn){ coverRemoveBtn.addEventListener('click',(e)=>{ e.stopPropagation(); clearCoverPreview(); updateDirty(); }); }
 
 // --- Helpers ---
 function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function clearCoverPreview(){ coverPreview.style.display='none'; coverPlaceholder.style.display='block'; delete coverPreview.dataset.b64; delete coverPreview.dataset.mime; coverPreview.src=''; if(coverRemoveBtn) coverRemoveBtn.style.display='none'; coverFileInput.value=''; }
+function clearCoverPreview(){ coverPreview.style.display='none'; coverPlaceholder.style.display='block'; delete coverPreview.dataset.b64; delete coverPreview.dataset.mime; coverPreview.src=''; if(coverRemoveBtn) coverRemoveBtn.style.display='none'; coverFileInput.value=''; tileCoverClick.style.removeProperty('--cover-url'); }
 function showCoverLoaded(){ if(coverRemoveBtn) coverRemoveBtn.style.display='inline-flex'; }
 
 // --- State ---
 let entries=[]; let replaying=false;
 const SERVERLESS=true;
 let browserClient; let keyState={ loaded:false };
+
+// Edit queue: tracks in-flight edits and pending follow-up edits
+// Key: bookId or entryId, Value: { uploading: boolean, pendingPayload: payload|null }
+const editQueue = new Map();
 
 // Export reset function for logout
 export function resetKeyState() {
@@ -114,6 +258,7 @@ function getBalanceStatus() {
 function setStatus(m){ statusEl.textContent=m; statusEl.classList.remove('warning'); if(window.BOOKISH_DEBUG) console.debug('[Bookish] status:', m); }
 function orderEntries(){ entries.sort((a,b)=>{ const da=a.dateRead||''; const db=b.dateRead||''; if(da!==db) return db.localeCompare(da); const ca=a.createdAt||0; const cb=b.createdAt||0; if(ca!==cb) return cb-ca; return 0; }); }
 function formatDisplayDate(iso){ if(!iso) return ''; const d=new Date(iso+'T00:00:00Z'); if(isNaN(d)) return iso; return d.toLocaleDateString(undefined,{month:'short',year:'numeric'}); }
+function mapFormat(f){ const v=(f||'').toLowerCase(); if(v==='ebook') return 'ebook'; if(v==='audiobook'||v==='audio') return 'audio'; return 'print'; }
 
 // --- Modal helpers ---
 function openModal(entry){
@@ -129,14 +274,17 @@ function openModal(entry){
   form.priorTxid.value=entry?(entry.txid||entry.id||''):'';
   form.title.value=entry?entry.title:'';
   form.author.value=entry?entry.author:'';
-  form.edition.value=entry?entry.edition:'';
-  form.format.value=entry?entry.format:'paperback';
+  form.format.value=entry?mapFormat(entry.format):'print';
   form.dateRead.value=entry?entry.dateRead:new Date().toISOString().slice(0,10);
   if(notesInput) notesInput.value = entry?.notes || '';
+  initOptionalFields(entry);
+  populateOptionalFields(entry);
   if(entry&&entry.coverImage){
-    coverPreview.src='data:'+(entry.mimeType||'image/*')+';base64,'+entry.coverImage;
+    const coverDataUrl='data:'+(entry.mimeType||'image/*')+';base64,'+entry.coverImage;
+    coverPreview.src=coverDataUrl;
     coverPreview.style.display='block'; coverPlaceholder.style.display='none';
     coverPreview.dataset.b64=entry.coverImage; if(entry.mimeType) coverPreview.dataset.mime=entry.mimeType;
+    tileCoverClick.style.setProperty('--cover-url',`url('${coverDataUrl}')`);
     showCoverLoaded();
   } else { clearCoverPreview(); }
   // Delete button only for existing entry
@@ -149,7 +297,7 @@ function openModal(entry){
   // Auto-grow notes textarea to fit content
   setTimeout(()=>{ if(notesInput){ notesInput.style.height='auto'; notesInput.style.height=Math.max(60,notesInput.scrollHeight)+'px'; }}, 0);
 }
-function closeModal(){ modal.classList.remove('active'); const inner=modal.querySelector('.modal-inner'); if(inner) inner.classList.remove('add-mode'); form.reset(); coverPreview.style.display='none'; if(coverRemoveBtn) coverRemoveBtn.style.display='none'; delete form.dataset.orig; saveBtn.disabled=true; if(window.bookSearch) window.bookSearch.handleModalOpen(true); }
+function closeModal(){ modal.classList.remove('active'); const inner=modal.querySelector('.modal-inner'); if(inner) inner.classList.remove('add-mode'); form.reset(); resetOptionalFields(); coverPreview.style.display='none'; if(coverRemoveBtn) coverRemoveBtn.style.display='none'; delete form.dataset.orig; saveBtn.disabled=true; if(window.bookSearch) window.bookSearch.handleModalOpen(true); }
 function clearBooks(){ entries=[]; render(); }
 window.bookishApp={ openModal, clearBooks, showCoverLoaded, clearCoverPreview, render };
 // Dirty tracking helpers
@@ -157,11 +305,13 @@ function currentFormState(){ return JSON.stringify({
   prior: form.priorTxid.value||'',
   title: form.title.value.trim(),
   author: form.author.value.trim(),
-  edition: form.edition.value.trim(),
   format: form.format.value,
   dateRead: form.dateRead.value,
   cover: coverPreview.dataset.b64||'',
-  notes: (notesInput?.value||'').trim()
+  notes: (notesInput?.value||'').trim(),
+  rating: ratingInput?.value||'',
+  owned: ownedToggle?.checked?'1':'',
+  tags: collectTags()
 }); }
 function snapshotOriginal(){ form.dataset.orig = currentFormState(); }
 function updateDirty(){ const orig=form.dataset.orig||''; const cur=currentFormState(); saveBtn.disabled = (orig===cur); }
@@ -181,10 +331,11 @@ coverFileInput.addEventListener('change', async ()=>{ const f=coverFileInput.fil
     coverPlaceholder.style.display = 'none';
     coverPreview.dataset.b64 = base64;
     coverPreview.dataset.mime = mime;
+    tileCoverClick.style.setProperty('--cover-url',`url('${dataUrl}')`);
     showCoverLoaded();
   } catch(err) {
     // Fallback to original if resize fails
-    const r = new FileReader(); r.onload = e => { const b64full = e.target.result; const b64 = b64full.split(',')[1]; coverPreview.src = b64full; coverPreview.style.display = 'block'; coverPlaceholder.style.display = 'none'; coverPreview.dataset.b64 = b64; coverPreview.dataset.mime = f.type || 'image/jpeg'; showCoverLoaded(); }; r.readAsDataURL(f);
+    const r = new FileReader(); r.onload = e => { const b64full = e.target.result; const b64 = b64full.split(',')[1]; coverPreview.src = b64full; coverPreview.style.display = 'block'; coverPlaceholder.style.display = 'none'; coverPreview.dataset.b64 = b64; coverPreview.dataset.mime = f.type || 'image/jpeg'; tileCoverClick.style.setProperty('--cover-url',`url('${b64full}')`); showCoverLoaded(); }; r.readAsDataURL(f);
   }
 });
 
@@ -385,20 +536,41 @@ function buildCardHTML(e){
   const dotTitle = (!e.txid) ? 'Local only' : (e.onArweave ? 'Saved to Arweave' : 'Saved to Irys \u2014 settling to Arweave\u2026');
   const dateDisp=formatDisplayDate(e.dateRead);
   const notesSnippet = e.notes ? `<p class="card-notes">${escapeHtml(e.notes)}</p>` : '';
+  const metaStrip = buildCardMetadata(e);
+  const coverDataUrl = e.coverImage ? `data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}` : '';
   return `
       <div class="status-dot ${dotClass}" data-tip="${dotTitle}"></div>
-      <div class="cover">${e.coverImage?`<img src="data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}">`:`<div class="generated-cover" style="background:${generatedCoverColor(e.title||'')}"><span class="generated-title">${escapeHtml(e.title||'Untitled')}</span>${e.author?`<span class="generated-author">${escapeHtml(e.author)}</span>`:''}</div>`}</div>
+      <div class="cover"${coverDataUrl?` style="--cover-url:url('${coverDataUrl}')"`:''}>${e.coverImage?`<img src="${coverDataUrl}">`:`<div class="generated-cover" style="background:${generatedCoverColor(e.title||'')}"><span class="generated-title">${escapeHtml(e.title||'Untitled')}</span>${e.author?`<span class="generated-author">${escapeHtml(e.author)}</span>`:''}</div>`}</div>
       <div class="meta">
         <p class="title">${e.title||'<i>Untitled</i>'}</p>
         <p class="author">${e.author||''}</p>
+        ${metaStrip}
         <div class="details">${dateDisp ? `<span class="read-date">Read ${dateDisp}</span>` : ''}</div>
         ${notesSnippet}
       </div>`;
 }
 
+function buildCardMetadata(e){
+  const parts=[];
+  if(e.rating && e.rating>=1 && e.rating<=5){
+    const filled='★'.repeat(e.rating);
+    const empty='☆'.repeat(5-e.rating);
+    parts.push(`<span class="card-rating" aria-label="Rated ${e.rating} out of 5">${filled}<span class="stars-empty">${empty}</span></span>`);
+  }
+  if(e.owned){
+    parts.push('<span class="card-owned">📖 Owned</span>');
+  }
+  if(e.tags){
+    const tagList=e.tags.split(',').map(t=>t.trim()).filter(Boolean).slice(0,3);
+    if(tagList.length) parts.push('<span class="card-tags">'+tagList.map(t=>escapeHtml(t)).join(' · ')+'</span>');
+  }
+  if(!parts.length) return '';
+  return '<div class="card-metadata">'+parts.join('<span class="meta-sep">·</span>')+'</div>';
+}
+
 /** Quick fingerprint for change detection — avoids unnecessary innerHTML rewrites */
 function entryFingerprint(e){
-  return (e.txid||e.id||'')+'\t'+(e.title||'')+'\t'+(e.author||'')+'\t'+(e.dateRead||'')+'\t'+(e.notes||'')+'\t'+(e.coverImage?'1':'0')+'\t'+(e.onArweave?'1':'0')+'\t'+(e._deleting?'1':'0')+'\t'+(e.format||'')+'\t'+(e.status||'');
+  return (e.txid||e.id||'')+'\t'+(e.title||'')+'\t'+(e.author||'')+'\t'+(e.dateRead||'')+'\t'+(e.notes||'')+'\t'+(e.coverImage?'1':'0')+'\t'+(e.onArweave?'1':'0')+'\t'+(e._deleting?'1':'0')+'\t'+(e.format||'')+'\t'+(e.status||'')+'\t'+(e.rating||'')+'\t'+(e.owned?'1':'0')+'\t'+(e.tags||'');
 }
 
 function render(){
@@ -667,6 +839,9 @@ async function serverlessFetchEntries(){
   const alreadySynced = liveEdges.filter(e => confirmedTxids.has(e.node.id));
 
   console.log('[Bookish] Cache check:', alreadySynced.length, 'already synced,', needsDecrypt.length, 'need decrypt');
+  // Track cache hits for geek panel
+  window.bookishNet = window.bookishNet || { reads:{ irys:0, arweave:0, errors:0 }, cacheHits:0 };
+  window.bookishNet.cacheHits = (window.bookishNet.cacheHits || 0) + alreadySynced.length;
 
   // Step 3: Decrypt entries that aren't fully synced in cache
   const hydrated = [];
@@ -696,8 +871,39 @@ async function serverlessFetchEntries(){
   }
 
   console.log('[Bookish] Decrypted', needsDecrypt.length, 'entries in', Date.now() - decryptStart, 'ms');
-  hydrated.sort((a,b)=>{ const da=a.dateRead||'0000-00-00'; const db=b.dateRead||'0000-00-00'; if(da!==db) return db.localeCompare(da); const ha=(a.block&&a.block.height)||0; const hb=(b.block&&b.block.height)||0; return hb-ha; });
-  return { entries:hydrated, tombstones };
+  
+  // Step 5: Deduplicate by bookId (safety net if Prev chain is broken)
+  // Keep newest version of each book (no block = Irys-only = most recent)
+  const byBookId = new Map();
+  const entryScore = (e) => {
+    // Higher score = keep this one
+    // Irys-only (no block) is newest, give highest score
+    // Otherwise, higher block height = more recent
+    if (!e.block || !e.block.height) return Infinity;
+    return e.block.height;
+  };
+  for (const entry of hydrated) {
+    if (!entry.bookId) continue;
+    const existing = byBookId.get(entry.bookId);
+    if (!existing) {
+      byBookId.set(entry.bookId, entry);
+    } else {
+      // Keep the one with higher score (more recent)
+      if (entryScore(entry) > entryScore(existing)) {
+        console.log('[Bookish] Dedup by bookId: keeping', entry.txid?.slice(0,8), 'over', existing.txid?.slice(0,8), 'for book', entry.bookId?.slice(0,8));
+        byBookId.set(entry.bookId, entry);
+      }
+    }
+  }
+  // Include entries without bookId (shouldn't happen but be safe)
+  const dedupedHydrated = [...byBookId.values(), ...hydrated.filter(e => !e.bookId)];
+  
+  if (dedupedHydrated.length < hydrated.length) {
+    console.warn('[Bookish] Removed', hydrated.length - dedupedHydrated.length, 'duplicate entries by bookId');
+  }
+  
+  dedupedHydrated.sort((a,b)=>{ const da=a.dateRead||'0000-00-00'; const db=b.dateRead||'0000-00-00'; if(da!==db) return db.localeCompare(da); const ha=(a.block&&a.block.height)||0; const hb=(b.block&&b.block.height)||0; return hb-ha; });
+  return { entries:dedupedHydrated, tombstones };
 }
 
 // --- Ops replay ---
@@ -722,6 +928,22 @@ async function replayOps(){
           await window.bookishCache.replaceProvisional(oldId,local);
           await window.bookishCache.removeOp(op.id);
           setStatus('Republished '+(local.title||''));
+          orderEntries(); render();
+        } catch{
+          setStatus('Replay pending...');
+          diagMaybeSet(['Awaiting Irys credit...','Will retry automatically']);
+          break;
+        }
+      } else if(op.type==='edit'){
+        const local=entries.find(e=>e.txid===op.priorTxid) || entries.find(e=>e.id===op.priorTxid);
+        if(!local){ await window.bookishCache.removeOp(op.id); continue; }
+        try {
+          op.payload.bookId=local.bookId;
+          const res=await browserClient.uploadEntry(op.payload,{ extraTags:[{name:'Prev',value:op.priorTxid}] });
+          const oldTxid=op.priorTxid; local.txid=res.txid; local.id=res.txid; local.pending=false; local.status='confirmed'; local.seenRemote=true;
+          await window.bookishCache.replaceProvisional(oldTxid,local);
+          await window.bookishCache.removeOp(op.id);
+          setStatus('Re-saved '+(local.title||''));
           orderEntries(); render();
         } catch{
           setStatus('Replay pending...');
@@ -765,6 +987,17 @@ async function syncBooksFromArweave(){
 
   const remote = remoteEntries.map(e => ({ ...e, status: 'confirmed', id: e.txid }));
   entries = await window.bookishCache.applyRemote(remote, tombstones);
+  
+  // Compact duplicates (handles race conditions from quick edits)
+  const { toKeep, toDelete } = window.bookishCache.compactDuplicates(entries);
+  if (toDelete.length > 0) {
+    console.warn('[Bookish] Compacting', toDelete.length, 'duplicate entries from cache');
+    for (const id of toDelete) {
+      await window.bookishCache.deleteById(id);
+    }
+    entries = toKeep;
+  }
+  
   entries.forEach(e => e._committed = true);
   orderEntries();
   render();
@@ -848,30 +1081,112 @@ async function createServerless(payload){ if(window.bookishCache){ const dup=awa
     }
   }
 }
-async function editServerless(priorTxid,payload){ const old=entries.find(e=>e.txid===priorTxid) || entries.find(e=>e.id===priorTxid); if(!old) throw new Error('Entry not found'); const snapshot={...old}; Object.assign(old,payload); old.pending=true; old.status='pending'; old.seenRemote=false; old._committed=false; await window.bookishCache.putEntry(old); markDirty(); orderEntries(); render(); if(!old.txid){ /* local-only entry — saved to cache, no upload needed */ return; } try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot upload: encryption keys not available'); payload.bookId=old.bookId; diagMaybeSet(['Saving via Irys\u2026']); const res=await browserClient.uploadEntry({ ...payload },{ extraTags:[{name:'Prev',value:priorTxid}] }); const oldTxid=priorTxid; old.txid=res.txid; old.id=res.txid; old.pending=false; old.status='confirmed'; old.seenRemote=true; await window.bookishCache.replaceProvisional(oldTxid,old); walletError=null; orderEntries(); render(); uiStatusManager.refresh(); diagMaybeClear(); } catch(e){ if(e && e.code==='irys-required'){ // revert UI and prompt refresh
-    Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
-    const pending = { type:'edit', priorTxid, payload };
+async function editServerless(priorTxid, payload) {
+  const old = entries.find(e => e.txid === priorTxid) || entries.find(e => e.id === priorTxid);
+  if (!old) throw new Error('Entry not found');
+  
+  const entryKey = old.bookId || old.id;
+  const queueEntry = editQueue.get(entryKey);
+  
+  // Always update the local state immediately for responsive UI
+  const snapshot = { ...old };
+  Object.assign(old, payload);
+  old.pending = true;
+  old.status = 'pending';
+  old.seenRemote = false;
+  old._committed = false;
+  await window.bookishCache.putEntry(old);
+  markDirty();
+  orderEntries();
+  render();
+  
+  // If an upload is already in progress, queue this as the pending edit
+  if (queueEntry?.uploading) {
+    console.log('[Bookish] Edit queued - will upload after current edit completes');
+    queueEntry.pendingPayload = { ...payload, bookId: old.bookId };
+    return;
+  }
+  
+  // Start the upload chain
+  editQueue.set(entryKey, { uploading: true, pendingPayload: null });
+  
+  await doEditUpload(entryKey, old, priorTxid, { ...payload, bookId: old.bookId }, snapshot);
+}
+
+async function doEditUpload(entryKey, entry, prevTxid, payload, snapshot) {
+  if (!entry.txid && !prevTxid) {
+    // local-only entry — saved to cache, no upload needed
+    editQueue.delete(entryKey);
+    return;
+  }
+  
+  try {
+    const haveKeys = await ensureKeys();
+    if (!haveKeys) throw new Error('Cannot upload: encryption keys not available');
+    
+    diagMaybeSet(['Saving via Irys\u2026']);
+    const res = await browserClient.uploadEntry(payload, { extraTags: [{ name: 'Prev', value: prevTxid }] });
+    
+    const oldTxid = prevTxid;
+    entry.txid = res.txid;
+    entry.id = res.txid;
+    entry.pending = false;
+    entry.status = 'confirmed';
+    entry.seenRemote = true;
+    await window.bookishCache.replaceProvisional(oldTxid, entry);
+    walletError = null;
+    orderEntries();
+    render();
+    uiStatusManager.refresh();
+    diagMaybeClear();
+    
+    // Check if there's a pending edit waiting
+    const queueEntry = editQueue.get(entryKey);
+    if (queueEntry?.pendingPayload) {
+      console.log('[Bookish] Processing queued edit with new Prev:', res.txid.slice(0, 8));
+      const nextPayload = queueEntry.pendingPayload;
+      queueEntry.pendingPayload = null;
+      // Chain the next edit with the just-completed txid as Prev
+      await doEditUpload(entryKey, entry, res.txid, nextPayload, snapshot);
+    } else {
+      editQueue.delete(entryKey);
+    }
+  } catch (e) {
+    editQueue.delete(entryKey);
+    // Revert to snapshot on error
+    Object.assign(entry, snapshot);
+    await window.bookishCache.putEntry(entry);
+    orderEntries();
+    render();
+    
+    const pending = { type: 'edit', priorTxid: prevTxid, payload };
+    if (window.bookishCache) await window.bookishCache.queueOp(pending);
     lastPendingOp = pending;
-    walletError='Irys client missing. Refresh page and retry.'; uiStatusManager.refresh();
-  diagMaybeSet(['Irys client missing','Refresh page and retry']);
-  } else if(e && e.code==='post-fund-timeout'){
-    Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
-    const pending = { type:'edit', priorTxid, payload };
-    lastPendingOp = pending;
-    walletError='Funding sent. Credit pending on Irys (few minutes). Retry from Account shortly.'; uiStatusManager.refresh();
-  diagMaybeSet(['Funding sent – awaiting credit','Retry from Account shortly']);
-  } else if(e && (e.code==='base-insufficient-funds' || e.code==='base-insufficient-funds-recent')){
-    Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render();
-    const pending = { type:'edit', priorTxid, payload };
-    lastPendingOp = pending;
-    walletError='Auto-fund blocked: Base wallet low on ETH. Top up and retry from Account.'; uiStatusManager.refresh();
-  diagMaybeSet(['Base wallet low on ETH','Add a small amount, then retry']);
-  } else { Object.assign(old,snapshot); await window.bookishCache.putEntry(old); orderEntries(); render(); walletError='Save failed'; uiStatusManager.refresh(); diagMaybeSet(['Save failed']); } } }
+    
+    if (e && e.code === 'irys-required') {
+      walletError = 'Irys client missing. Refresh page and retry.';
+      uiStatusManager.refresh();
+      diagMaybeSet(['Irys client missing', 'Refresh page and retry']);
+    } else if (e && e.code === 'post-fund-timeout') {
+      walletError = 'Funding sent. Credit pending on Irys (few minutes). Retry from Account shortly.';
+      uiStatusManager.refresh();
+      diagMaybeSet(['Funding sent – awaiting credit', 'Retry from Account shortly']);
+    } else if (e && (e.code === 'base-insufficient-funds' || e.code === 'base-insufficient-funds-recent')) {
+      walletError = 'Auto-fund blocked: Base wallet low on ETH. Top up and retry from Account.';
+      uiStatusManager.refresh();
+      diagMaybeSet(['Base wallet low on ETH', 'Add a small amount, then retry']);
+    } else {
+      walletError = 'Save failed';
+      uiStatusManager.refresh();
+      diagMaybeSet(['Save failed']);
+    }
+  }
+}
 async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid) || entries.find(e=>e.id===priorTxid); if(!entry) return; markDeletingVisual(entry); uiStatusManager.refresh(); if(!entry.txid){ /* local-only entry — just remove from cache and entries */ if(window.bookishCache) await window.bookishCache.deleteById(entry.id); entries=entries.filter(e=>e!==entry); orderEntries(); render(); uiStatusManager.refresh(); return; } try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot delete: encryption keys not available'); await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); walletError=null; markDirty(); orderEntries(); render(); uiStatusManager.refresh(); } catch{ entry._deleting=false; render(); walletError='Delete failed'; uiStatusManager.refresh(); } }
 
 // --- Form handlers ---
 let _formSubmitting = false;
-form.addEventListener('submit',ev=>{ ev.preventDefault(); if(_formSubmitting) return; _formSubmitting=true; const priorTxid=form.priorTxid.value||undefined; const payload={ title:form.title.value.trim(), author:form.author.value.trim(), edition:form.edition.value.trim(), format:form.format.value, dateRead:form.dateRead.value }; if(coverPreview.dataset.b64){ payload.coverImage=coverPreview.dataset.b64; if(coverPreview.dataset.mime) payload.mimeType=coverPreview.dataset.mime; } const notesVal=(notesInput?.value||'').trim(); if(notesVal) payload.notes=notesVal; uiStatusManager.refresh(); if(priorTxid){ // immediate close, background edit
+form.addEventListener('submit',ev=>{ ev.preventDefault(); if(_formSubmitting) return; _formSubmitting=true; const priorTxid=form.priorTxid.value||undefined; const payload={ title:form.title.value.trim(), author:form.author.value.trim(), format:form.format.value, dateRead:form.dateRead.value }; if(coverPreview.dataset.b64){ payload.coverImage=coverPreview.dataset.b64; if(coverPreview.dataset.mime) payload.mimeType=coverPreview.dataset.mime; } const notesVal=(notesInput?.value||'').trim(); if(notesVal) payload.notes=notesVal; const optVals=getOptionalFieldValues(); if(priorTxid){ payload.rating=optVals.rating||0; payload.owned=!!optVals.owned; payload.tags=optVals.tags||''; if(!notesVal) payload.notes=''; } else { if(optVals.rating) payload.rating=optVals.rating; if(optVals.owned) payload.owned=optVals.owned; if(optVals.tags) payload.tags=optVals.tags; } uiStatusManager.refresh(); if(priorTxid){ // immediate close, background edit
   closeModal();
   editServerless(priorTxid,payload).catch(()=> { walletError='Save failed'; uiStatusManager.refresh(); });
 } else { closeModal(); createServerless(payload).catch(()=> { walletError='Save failed'; uiStatusManager.refresh(); }); }
@@ -1035,9 +1350,14 @@ function updateGeekPanel(){
     geekBody.textContent = 'Sign in to view sync status';
     return;
   }
-  const net = window.bookishNet || { reads:{ irys:0, arweave:0, errors:0 } };
-  geekBody.textContent = `Irys: ${net.reads.irys||0}  Arweave: ${net.reads.arweave||0}  Err: ${net.reads.errors||0}`;
+  const net = window.bookishNet || { reads:{ irys:0, arweave:0, errors:0 }, cacheHits:0 };
+  const fetched = (net.reads.irys||0) + (net.reads.arweave||0);
+  const cached = net.cacheHits || 0;
+  const errs = net.reads.errors || 0;
+  geekBody.textContent = `Fetched: ${fetched}  Cached: ${cached}  Err: ${errs}`;
 }
+window.updateGeekPanel = updateGeekPanel;
+
 function openSuperuser(){
   setSuperuser(true);
   if(geekPanel) geekPanel.style.display='block';
@@ -1123,7 +1443,7 @@ function autoGrowNotes(){
   notesInput.style.height = 'auto';
   notesInput.style.height = Math.max(60, notesInput.scrollHeight) + 'px';
 }
-notesInput?.addEventListener('input', autoGrowNotes);
+notesInput?.addEventListener('input', ()=>{ autoGrowNotes(); if(notesInput.value.trim()) activateField('notes'); });
 // Also auto-grow on modal open (when value is set programmatically)
 // --- Pinch / wheel zoom (restore) ---
 (function enableMobilePinch(){
