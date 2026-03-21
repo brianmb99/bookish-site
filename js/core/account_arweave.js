@@ -3,6 +3,27 @@
 // Separated from account_ui.js for cleaner architecture
 
 import { encryptJsonToBytes, decryptBytesToJson, hexToBytes } from './crypto_core.js';
+import { registerPendingTxByKey, fetchPendingTxIdsByKey } from './pending_tx_bridge.js';
+import { queryGraphQL } from './arweave_query.js';
+
+const TX_CACHE_PREFIX = 'bookish.txcache.acct.';
+
+// Derive a bridge key that won't collide with the book sync bridge key.
+// Books use SHA-256(wallet + 'bookish'); we namespace account metadata
+// so its tx IDs don't appear in book sync results.
+async function acctBridgeKey(hashedLookupKey) {
+  const input = hashedLookupKey + 'acctmeta';
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function cacheTxId(hashedLookupKey, txId) {
+  try { localStorage.setItem(TX_CACHE_PREFIX + hashedLookupKey, txId); } catch {}
+}
+
+function getCachedTxId(hashedLookupKey) {
+  try { return localStorage.getItem(TX_CACHE_PREFIX + hashedLookupKey); } catch { return null; }
+}
 
 /**
  * Upload encrypted account metadata to Arweave (profile only, NO SEED)
@@ -54,10 +75,12 @@ export async function uploadAccountMetadata({ address, displayName, symKey, crea
     throw new Error('Upload client not initialized');
   }
 
-  const result = await window.bookishUpload.upload(encryptedPayload, tags);
+  const result = await window.bookishUpload.upload(encryptedPayload, tags, { skipFee: true });
   const txId = result.id;
 
   console.log('[Bookish:AccountArweave] Account metadata uploaded:', txId);
+  cacheTxId(hashedLookupKey, txId);
+  acctBridgeKey(hashedLookupKey).then(bk => registerPendingTxByKey(bk, txId)).catch(() => {});
   return txId;
 }
 
@@ -100,31 +123,60 @@ export async function downloadAccountMetadata(walletAddress, symKey) {
   }`;
 
   try {
-    const response = await fetch('https://arweave.net/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
-    });
-
-    const result = await response.json();
-    const edges = result.data?.transactions?.edges || [];
-
-    if (edges.length === 0) {
-      console.log('[Bookish:AccountArweave] No account metadata found');
-      return null;
+    // Check local tx ID cache first (instant, avoids GraphQL indexing delay)
+    let txId = getCachedTxId(hashedLookupKey);
+    if (txId) {
+      console.log(`[Bookish:AccountArweave] Using cached tx: ${txId}`);
     }
-
-    const txId = edges[0].node.id;
+    if (!txId) {
+      try {
+        const bk = await acctBridgeKey(hashedLookupKey);
+        const bridgeIds = await fetchPendingTxIdsByKey(bk);
+        if (bridgeIds.length > 0) {
+          txId = bridgeIds[bridgeIds.length - 1];
+          console.log(`[Bookish:AccountArweave] Found via bridge: ${txId}`);
+          cacheTxId(hashedLookupKey, txId);
+        }
+      } catch { /* bridge unavailable — fall through to GraphQL */ }
+    }
+    if (!txId) {
+      const { data, error } = await queryGraphQL(query);
+      if (error) {
+        console.warn('[Bookish:AccountArweave] GraphQL unavailable:', error);
+        return null;
+      }
+      const edges = data?.transactions?.edges || [];
+      if (edges.length === 0) {
+        console.log('[Bookish:AccountArweave] No account metadata found');
+        return null;
+      }
+      txId = edges[0].node.id;
+      cacheTxId(hashedLookupKey, txId);
+    }
     console.log(`[Bookish:AccountArweave] Found metadata: ${txId}`);
 
-    // Download encrypted payload
-    const dataResponse = await fetch(`https://arweave.net/${txId}`);
-    if (!dataResponse.ok) {
-      throw new Error(`Failed to download metadata: ${dataResponse.status}`);
+    // Download encrypted payload — Turbo first (immediate for recent uploads), Arweave fallback
+    const gateways = [
+      { url: `https://turbo-gateway.com/${txId}`, label: 'Turbo' },
+      { url: `https://arweave.net/${txId}`, label: 'Arweave' }
+    ];
+    let encryptedBytes = null;
+    for (const gw of gateways) {
+      try {
+        const dataResponse = await fetch(gw.url);
+        if (dataResponse.ok) {
+          encryptedBytes = new Uint8Array(await dataResponse.arrayBuffer());
+          console.log(`[Bookish:AccountArweave] Downloaded from ${gw.label} (${encryptedBytes.length} bytes)`);
+          break;
+        }
+        console.warn(`[Bookish:AccountArweave] ${gw.label} returned ${dataResponse.status} for ${txId}`);
+      } catch (err) {
+        console.warn(`[Bookish:AccountArweave] ${gw.label} fetch failed:`, err.message);
+      }
     }
-
-    const encryptedBytes = new Uint8Array(await dataResponse.arrayBuffer());
-    console.log('[Bookish:AccountArweave] Downloaded encrypted payload, size:', encryptedBytes.length, 'bytes');
+    if (!encryptedBytes) {
+      throw new Error(`Failed to download metadata from any gateway: ${txId}`);
+    }
 
     // Decrypt
     const decrypted = await decryptBytesToJson(symKey, encryptedBytes);
@@ -144,7 +196,6 @@ export async function downloadAccountMetadata(walletAddress, symKey) {
  */
 export async function accountMetadataExists(walletAddress) {
   try {
-    // Generate lookup key
     const lookupInput = walletAddress.toLowerCase() + 'bookish';
     const lookupHash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(lookupInput));
     const hashedLookupKey = Array.from(new Uint8Array(lookupHash))
@@ -160,22 +211,13 @@ export async function accountMetadataExists(walletAddress) {
         ],
         first: 1
       ) {
-        edges {
-          node {
-            id
-          }
-        }
+        edges { node { id } }
       }
     }`;
 
-    const response = await fetch('https://arweave.net/graphql', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query })
-    });
-
-    const result = await response.json();
-    return (result.data?.transactions?.edges || []).length > 0;
+    const { data, error } = await queryGraphQL(query);
+    if (error) return false;
+    return (data?.transactions?.edges || []).length > 0;
   } catch (error) {
     console.error('[Bookish:AccountPersistence] Existence check failed:', error);
     return false;

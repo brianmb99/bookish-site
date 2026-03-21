@@ -1,21 +1,14 @@
 // protocol_config.js - Protocol configuration constants
 
 export const PROTOCOL_CONFIG = {
-  // Protocol revenue wallet (Base mainnet)
-  // This wallet collects the protocol fee from all uploads
-  // Separate from the faucet wallet
-  PROTOCOL_WALLET: '0xaf93cBd1270aA26F5672056cEbbFa8Bb3130c4a4',
+  UPLOAD_PROXY: 'https://bookish-upload-proxy.bookish.workers.dev',
 
-  // Flat per-upload fee in wei sent to the protocol wallet before every upload.
-  // 0.0000025 ETH ≈ $0.005 at $2000/ETH.
-  // Sized so the faucet drip (0.000025 ETH) covers ~10 uploads.
-  // Gas for the fee tx on Base is ~$0.0004 (<10% of fee), so this is efficient.
-  FLAT_FEE_WEI: '2500000000000',
+  // Protocol fee: ~$0.002 at $2000/ETH, collected via pre-signed ETH tx by the upload proxy
+  FLAT_FEE_WEI: '1000000000000', // 0.000001 ETH = 1e12 wei
+  FEE_CURRENCY: 'ETH',
+  FEE_VERSION: 2,
 
-  // Legacy: percentage-based fee, no longer used — replaced by FLAT_FEE_WEI.
-  FEE_BPS: 2500,
-  MIN_FEE_WEI: '33000000000',
+  PROTOCOL_WALLET: '0x7dbb8Bf8359dF93146A4656EB1292fcB1fd9a500',
 
-  // Feature flag - easy to disable if issues
   FEE_ENABLED: true,
 };

@@ -15,32 +15,20 @@
   <h1>Bookish</h1>
   <div style="display:flex;align-items:center;gap:10px;font-size:.65rem">
     <div id="status" style="display:none"></div>
-    <button id="wtrTrigger" class="wtr-trigger" style="display:none" title="Want to Read list"></button>
     <button id="installBtn" class="refresh-link" style="display:none" title="Install">Install</button>
-    <button id="syncNowBtn" class="refresh-link" title="Sync now" style="display:none">Sync</button>
     <button id="accountBtn" class="refresh-link account-link" title="Account">Account</button>
-    <button id="geekBtn" class="refresh-link" title="Tech Details" aria-controls="geekPanel">⚙︎</button>
   </div>
 </header>
-<!-- status banner removed; status now shown inside geek panel -->
-<div id="geekPanel" class="geek-panel" style="display:none">
-  <div class="geek-header">
-    <span class="geek-title">Network</span>
-    <span id="geekBody" class="geek-stats"></span>
-    <button id="geekClose" class="geek-close" title="Turn off developer mode">&times;</button>
-  </div>
-  <div id="geekStatusLine" class="geek-status-line"></div>
+<div class="action-bar">
+  <button id="newBtn" class="new-compact" title="Add a book">+ Add a Book</button>
+  <button id="wtrCounter" class="wtr-counter" title="Your reading list">My Reading List</button>
 </div>
-<div style="display:flex;gap:8px;margin:4px 0 12px">
-  <button id="newBtn" class="new-compact" title="Add new">＋ New</button>
-</div>
-<div id="accountBanner" class="account-banner" role="button" tabindex="0" style="display:none;"></div>
 <div id="accountNudgeBanner" class="nudge-banner" style="display:none;">
   <div class="nudge-content">
     <span class="nudge-icon">💡</span>
     <div class="nudge-text">
       <div class="nudge-headline">Want to access your books from other devices?</div>
-      <button id="nudgeCreateAccountBtn" class="btn-link nudge-cta">Create Free Account →</button>
+      <button id="nudgeCreateAccountBtn" class="btn-link nudge-cta">Create Account →</button>
     </div>
   </div>
   <button id="nudgeDismissBtn" class="nudge-dismiss" title="Dismiss">×</button>
@@ -61,7 +49,7 @@
   <div class="wtr-drawer" id="wtrDrawer">
     <div class="wtr-drawer-handle"></div>
     <div class="wtr-header">
-      <h3 class="wtr-title">Want to Read</h3>
+      <h3 class="wtr-title">My Reading List</h3>
       <button type="button" class="modal-close-btn" id="wtrClose" aria-label="Close">×</button>
     </div>
     <div id="wtrList" class="wtr-list"></div>
@@ -75,19 +63,23 @@
   </div>
 </div>
 
+<div id="shelfEmpty" class="shelf-empty" style="display:none">
+  <p class="shelf-empty-text">Books you're reading and have finished show up here.</p>
+  <button type="button" id="shelfEmptyBrowse" class="shelf-empty-link">Browse My Reading List →</button>
+</div>
 <div id="cards" class="cards"></div>
 <div id="empty" class="empty-state" style="display:none">
   <div class="empty-illustration">📚</div>
   <h2 class="empty-headline">Your reading journey starts here</h2>
   <p class="empty-subtext">Track what you read. Keep it forever. Access it anywhere.</p>
-  <button id="emptyAddBookBtn" class="btn primary empty-cta">Add Your First Book</button>
+  <button id="emptyAddBookBtn" class="btn primary empty-cta">Start Your Reading List</button>
   <div id="emptySignIn" class="empty-signin">Already have an account? <button class="link-btn" id="emptySignInBtn">Sign in</button></div>
 </div>
 <div id="celebrationToast" class="toast celebration-toast" style="display:none;">
   <span class="toast-icon">🎉</span>
   <span class="toast-message">First book added! You're on your way.</span>
 </div>
-<footer>Bookish • Alpha • v0.2.7 • <a href="/forever.html">Data export</a></footer>
+<footer>Bookish • Alpha • v0.2.44 • <a href="/forever.html" target="_blank" rel="noopener">Data export</a></footer>
 </div>
 
 <!-- Notes expand overlay -->
@@ -137,18 +129,18 @@
     </div>
     <form id="entryForm" class="inline" novalidate>
       <div class="form-as-tile">
+        <div class="fields-cluster">
+          <div class="field-block"><label>Title</label><input name="title" required placeholder="Title"></div>
+          <div class="field-block"><label>Author</label><input name="author" required placeholder="Author"></div>
+          <div class="field-block"><label>Format</label><select name="format"><option value="print">Print</option><option value="ebook">Ebook</option><option value="audio">Audio</option></select></div>
+          <div class="field-block"><label>Date Read</label><div class="date-input-wrap"><input name="dateRead" type="date"><button type="button" class="cal-btn" id="openCalendarBtn" title="Pick date">📅</button></div></div>
+        </div>
         <div class="tile-cover" id="tileCoverClick">
           <img class="preview" id="coverPreview" style="display:none"/>
           <div class="placeholder" id="coverPlaceholder"><div class="placeholder-icon"><svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg><span>Click to upload cover</span></div></div>
           <div class="cover-hover-hint" id="coverHoverHint">Click to change cover</div>
           <button type="button" class="cover-remove-btn" id="coverRemoveBtn" title="Remove cover" style="display:none">×</button>
           <input type="file" name="coverFile" accept="image/*" style="display:none" id="hiddenCoverInput"/>
-        </div>
-        <div class="fields-cluster">
-          <div class="field-block"><label>Title</label><input name="title" required placeholder="Title"></div>
-          <div class="field-block"><label>Author</label><input name="author" required placeholder="Author"></div>
-          <div class="field-block"><label>Format</label><select name="format"><option value="print">Print</option><option value="ebook">Ebook</option><option value="audio">Audio</option></select></div>
-          <div class="field-block"><label>Date Read</label><div class="date-input-wrap"><input name="dateRead" type="date"><button type="button" class="cal-btn" id="openCalendarBtn" title="Pick date">📅</button></div></div>
         </div>
       </div>
       <div class="optional-fields-zone" id="optionalFieldsZone">

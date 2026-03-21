@@ -15,6 +15,22 @@ export async function computeContentHash(entry) {
 }
 
 /**
+ * Deterministic winner selection for conflict resolution.
+ * Single source of truth — used by all dedup/merge layers.
+ * @param {Object} a
+ * @param {Object} b
+ * @returns {Object} the winning entry
+ */
+export function pickWinner(a, b) {
+  const aTime = a.modifiedAt || 0;
+  const bTime = b.modifiedAt || 0;
+  if (aTime !== bTime) return aTime > bTime ? a : b;
+  if (a.status === 'confirmed' && b.status !== 'confirmed') return a;
+  if (b.status === 'confirmed' && a.status !== 'confirmed') return b;
+  return a;
+}
+
+/**
  * Detect if an entry is a duplicate of existing entries
  * @param {Object} payload - Entry to check for duplication
  * @param {Array<Object>} existingEntries - Local entries to check against
@@ -51,7 +67,10 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
   const localByBookId = new Map();
   for (const e of localEntries) {
     if (e.bookId && e.status !== 'tombstoned') {
-      localByBookId.set(e.bookId, e);
+      const existing = localByBookId.get(e.bookId);
+      if (!existing || pickWinner(e, existing) === e) {
+        localByBookId.set(e.bookId, e);
+      }
     }
   }
 
@@ -105,26 +124,30 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
         txid: r.txid,
         bookId: r.bookId || null,
         contentHash,
-        createdAt: Date.now(),
+        createdAt: r.createdAt || Date.now(),
         status: 'confirmed',
         seenRemote: true,
         onArweave: false
       };
 
       if (supersededLocal) {
-        // Edit race: sync saw new txid before replaceProvisional ran
+        console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-prev');
         toReplace.push({ prevId: supersededLocal.id, entry: newEntry });
       } else {
-        // Create race: sync saw confirmed txid while local still has provisional "local-xxx"
         const provisionalMatch = localPendingByHash.get(contentHash);
         if (provisionalMatch) {
+          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-provisional');
           toReplace.push({ prevId: provisionalMatch.id, entry: newEntry });
-          localPendingByHash.delete(contentHash); // consume so we don't match twice
+          localPendingByHash.delete(contentHash);
         } else if (r.bookId && localByBookId.has(r.bookId)) {
-          // bookId match: local already has this book (likely a newer edit).
-          // The old Arweave txid reappeared before the new one was indexed.
-          // Skip — the local entry is authoritative.
+          const localMatch = localByBookId.get(r.bookId);
+          const wins = pickWinner(localMatch, newEntry) === newEntry;
+          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), 'bookId-match remote:', (newEntry.modifiedAt || 0), 'local:', (localMatch.modifiedAt || 0), '→', wins ? 'REPLACE' : 'skip');
+          if (wins) {
+            toReplace.push({ prevId: localMatch.id, entry: newEntry });
+          }
         } else {
+          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ add-new (bookId:', (r.bookId?.slice(0,8) || 'NONE'), ')');
           toAdd.push(newEntry);
         }
       }
@@ -205,7 +228,6 @@ export function compactDuplicates(entries) {
   }
 
   // Handle same-bookId duplicates (race condition from quick edits)
-  // Keep the one with highest block height, or if no block, prefer seenRemote
   const byBookId = new Map();
   for (const e of entries) {
     if (!e.bookId || e.status === 'tombstoned' || toDelete.includes(e.id)) continue;
@@ -213,14 +235,8 @@ export function compactDuplicates(entries) {
     if (!existing) {
       byBookId.set(e.bookId, e);
     } else {
-      // Determine which to keep: prefer confirmed, then higher block, then seenRemote
-      let keep = existing, drop = e;
-      const eScore = (e.status === 'confirmed' ? 1000 : 0) + (e.block?.height || 0) + (e.seenRemote ? 1 : 0);
-      const existScore = (existing.status === 'confirmed' ? 1000 : 0) + (existing.block?.height || 0) + (existing.seenRemote ? 1 : 0);
-      if (eScore > existScore) {
-        keep = e;
-        drop = existing;
-      }
+      const keep = pickWinner(existing, e);
+      const drop = keep === existing ? e : existing;
       byBookId.set(e.bookId, keep);
       if (!toDelete.includes(drop.id)) {
         toDelete.push(drop.id);

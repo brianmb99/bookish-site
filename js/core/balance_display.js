@@ -1,169 +1,70 @@
-// balance_display.js - User-friendly balance formatting
+// balance_display.js - User-friendly ETH balance formatting with USD estimates
+
+// Protocol fee per upload: 0.000001 ETH (~$0.002 at $2000/ETH)
+const COST_PER_BOOK_WEI = 1000000000000n; // 1e12 wei = 0.000001 ETH
+
+// Below half the fee there's not enough for anything useful
+const MIN_USEFUL_BALANCE_WEI = 500000000000n; // 5e11 wei
+
+const ASSUMED_ETH_PRICE_USD = 2000;
 
 /**
- * Estimated cost per book upload in wei.
- * This is dominated by the flat protocol fee (0.0000025 ETH per upload)
- * plus a small gas allowance for the fee transaction on Base L2.
- * Turbo storage is free for items under 100 KiB (covers all Bookish uploads).
- *
- * Must stay in sync with PROTOCOL_CONFIG.FLAT_FEE_WEI in protocol_config.js
+ * Parse an ETH balance into wei (BigInt).
+ * Accepts: raw BigInt, numeric string of wei, or decimal ETH string (e.g. "0.001").
  */
-const ESTIMATED_COST_PER_BOOK_WEI = BigInt('2500000000000'); // 0.0000025 ETH (matches flat fee)
+function parseWei(input) {
+  if (input == null) return 0n;
+  if (typeof input === 'bigint') return input;
 
-/**
- * Minimum useful balance (below this, can't do much)
- */
-const MIN_USEFUL_BALANCE_WEI = BigInt('500000000000'); // 0.0000005 ETH
-
-/**
- * Format a wallet balance as "~X books remaining"
- *
- * @param {string|bigint|number} balanceWei - Balance in wei (can be ETH string or wei)
- * @param {Object} options - Formatting options
- * @param {boolean} options.showExact - Include exact ETH in parentheses
- * @returns {string} Human-readable balance string
- */
-export function formatBalanceAsBooks(balanceWei, options = {}) {
-  // Convert ETH string to wei if needed
-  let balance;
-  if (typeof balanceWei === 'string') {
-    // Handle empty/null strings
-    if (!balanceWei || balanceWei.trim() === '') {
-      balance = 0n;
-    } else {
-      const parsed = parseFloat(balanceWei);
-      if (isNaN(parsed)) {
-        balance = 0n;
-      } else if (parsed < 1 || balanceWei.includes('.')) {
-        // Likely ETH format (has decimal or < 1), convert to wei
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else if (parsed < 1000) {
-        // Small integer without decimal - likely ETH (e.g., "1" = 1 ETH)
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else {
-        // Large number without decimal - likely wei format
-        balance = BigInt(Math.floor(parsed));
-      }
-    }
-  } else if (typeof balanceWei === 'number') {
-    // If number is < 1, assume ETH; otherwise assume wei
-    if (isNaN(balanceWei)) {
-      balance = 0n;
-    } else if (balanceWei < 1) {
-      balance = BigInt(Math.floor(balanceWei * 1e18));
-    } else {
-      balance = BigInt(Math.floor(balanceWei));
-    }
-  } else if (balanceWei == null) {
-    balance = 0n;
-  } else {
-    balance = BigInt(balanceWei || 0);
+  if (typeof input === 'number') {
+    if (isNaN(input)) return 0n;
+    if (input < 1e9) return BigInt(Math.floor(input * 1e18));
+    return BigInt(Math.floor(input));
   }
 
-  // Zero balance
-  if (balance <= 0n) {
-    return 'No balance';
+  if (typeof input === 'string') {
+    const s = input.trim();
+    if (!s) return 0n;
+    const parsed = parseFloat(s);
+    if (isNaN(parsed)) return 0n;
+    if (s.includes('.') || parsed < 1) return BigInt(Math.floor(parsed * 1e18));
+    return BigInt(Math.floor(parsed));
   }
 
-  // Below minimum useful
-  if (balance < MIN_USEFUL_BALANCE_WEI) {
-    return 'Balance too low';
-  }
-
-  // Calculate books
-  const booksRemaining = balance / ESTIMATED_COST_PER_BOOK_WEI;
-
-  // Format based on amount
-  let display;
-  if (booksRemaining <= 0n) {
-    display = 'Balance low';
-  } else if (booksRemaining === 1n) {
-    display = '~1 book remaining';
-  } else if (booksRemaining < 10n) {
-    display = `~${booksRemaining} books remaining`;
-  } else if (booksRemaining < 100n) {
-    // Round to nearest 5 for cleaner display
-    const remainder = booksRemaining % 5n;
-    let rounded;
-    if (remainder >= 3n) {
-      // Round up to next 5
-      rounded = booksRemaining - remainder + 5n;
-    } else {
-      // Round down to previous 5
-      rounded = booksRemaining - remainder;
-    }
-    // Ensure we don't go below 10 or above 95
-    if (rounded < 10n) rounded = 10n;
-    if (rounded > 95n) rounded = 95n;
-    display = `~${rounded} books remaining`;
-  } else {
-    display = '100+ books remaining';
-  }
-
-  // Optionally append exact balance
-  if (options.showExact) {
-    const ethBalance = formatWeiAsEth(balance);
-    display += ` (${ethBalance})`;
-  }
-
-  return display;
+  return BigInt(input || 0);
 }
 
 /**
- * Format wei as ETH string with appropriate precision
+ * Format an ETH balance as "~$X.XX (~N books)"
+ *
+ * @param {string|bigint|number} balanceETH - Balance in wei (raw BigInt or ETH decimal string)
+ * @returns {string} Human-readable balance string
  */
-function formatWeiAsEth(wei) {
-  const balance = BigInt(wei);
-  const eth = Number(balance) / 1e18;
+export function formatBalanceAsBooks(balanceETH) {
+  const balance = parseWei(balanceETH);
 
-  if (eth < 0.0001) {
-    return eth.toExponential(2) + ' ETH';
-  } else if (eth < 0.01) {
-    return eth.toFixed(6) + ' ETH';
-  } else {
-    return eth.toFixed(4) + ' ETH';
-  }
+  if (balance <= 0n) return 'No balance';
+  if (balance < MIN_USEFUL_BALANCE_WEI) return 'Balance too low';
+
+  const ethFloat = Number(balance) / 1e18;
+  const usd = (ethFloat * ASSUMED_ETH_PRICE_USD).toFixed(2);
+  const books = balance / COST_PER_BOOK_WEI;
+
+  if (books <= 0n) return `~$${usd}`;
+  if (books === 1n) return `~$${usd} (~1 book)`;
+  if (books < 100n) return `~$${usd} (~${books} books)`;
+  return `~$${usd} (100+ books)`;
 }
 
 /**
  * Get balance status for UI styling
  *
- * @param {string|bigint|number} balanceWei
+ * @param {string|bigint|number} balanceETH
  * @returns {'empty'|'low'|'ok'|'good'}
  */
-export function getBalanceStatus(balanceWei) {
-  // Convert ETH string to wei if needed (same logic as formatBalanceAsBooks)
-  let balance;
-  if (typeof balanceWei === 'string') {
-    if (!balanceWei || balanceWei.trim() === '') {
-      balance = 0n;
-    } else {
-      const parsed = parseFloat(balanceWei);
-      if (isNaN(parsed)) {
-        balance = 0n;
-      } else if (parsed < 1 || balanceWei.includes('.')) {
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else if (parsed < 1000) {
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else {
-        balance = BigInt(Math.floor(parsed));
-      }
-    }
-  } else if (typeof balanceWei === 'number') {
-    if (isNaN(balanceWei)) {
-      balance = 0n;
-    } else if (balanceWei < 1) {
-      balance = BigInt(Math.floor(balanceWei * 1e18));
-    } else {
-      balance = BigInt(Math.floor(balanceWei));
-    }
-  } else if (balanceWei == null) {
-    balance = 0n;
-  } else {
-    balance = BigInt(balanceWei || 0);
-  }
-
-  const books = balance / ESTIMATED_COST_PER_BOOK_WEI;
+export function getBalanceStatus(balanceETH) {
+  const balance = parseWei(balanceETH);
+  const books = balance / COST_PER_BOOK_WEI;
 
   if (balance <= 0n) return 'empty';
   if (books < 3n) return 'low';
@@ -174,38 +75,6 @@ export function getBalanceStatus(balanceWei) {
 /**
  * Check if balance is sufficient for at least one operation
  */
-export function hasUsableBalance(balanceWei) {
-  // Convert ETH string to wei if needed (same logic as formatBalanceAsBooks)
-  let balance;
-  if (typeof balanceWei === 'string') {
-    if (!balanceWei || balanceWei.trim() === '') {
-      balance = 0n;
-    } else {
-      const parsed = parseFloat(balanceWei);
-      if (isNaN(parsed)) {
-        balance = 0n;
-      } else if (parsed < 1 || balanceWei.includes('.')) {
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else if (parsed < 1000) {
-        balance = BigInt(Math.floor(parsed * 1e18));
-      } else {
-        balance = BigInt(Math.floor(parsed));
-      }
-    }
-  } else if (typeof balanceWei === 'number') {
-    if (isNaN(balanceWei)) {
-      balance = 0n;
-    } else if (balanceWei < 1) {
-      balance = BigInt(Math.floor(balanceWei * 1e18));
-    } else {
-      balance = BigInt(Math.floor(balanceWei));
-    }
-  } else if (balanceWei == null) {
-    balance = 0n;
-  } else {
-    balance = BigInt(balanceWei || 0);
-  }
-
-  return balance >= MIN_USEFUL_BALANCE_WEI;
+export function hasUsableBalance(balanceETH) {
+  return parseWei(balanceETH) >= COST_PER_BOOK_WEI;
 }
-

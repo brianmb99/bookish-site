@@ -1,10 +1,11 @@
 // Bookish app.js (pure serverless variant)
 
-import { initSyncManager, startSync, stopSync, getSyncStatusForUI, triggerPersistenceCheck, markDirty, triggerSyncNow } from './sync_manager.js';
+import { initSyncManager, startSync, stopSync, getSyncStatusForUI, triggerPersistenceCheck, triggerSyncNow, markDirty } from './sync_manager.js';
 import * as storageManager from './core/storage_manager.js';
 import uiStatusManager from './ui_status_manager.js';
 import { getAccountStatus } from './account_ui.js';
 import { resizeImageToBase64 } from './core/image_utils.js';
+import { BookRepository, READING_STATUS, normalizeReadingStatus } from './core/book_repository.js';
 
 // --- Version logging (always visible in console) ---
 {
@@ -22,14 +23,10 @@ import { resizeImageToBase64 } from './core/image_utils.js';
 
 // --- DOM refs ---
 const statusEl = document.getElementById('status');
-// status banner removed; we now write a single status line into the geek panel
 const cardsEl = document.getElementById('cards');
 const emptyEl = document.getElementById('empty');
-const geekBtn = document.getElementById('geekBtn');
-const geekPanel = document.getElementById('geekPanel');
-const geekClose = document.getElementById('geekClose');
-const geekBody = document.getElementById('geekBody');
-const geekStatusLine = document.getElementById('geekStatusLine');
+const shelfEmptyEl = document.getElementById('shelfEmpty');
+const actionBarEl = document.querySelector('.action-bar');
 const modal = document.getElementById('modal');
 // Funding modal refs
 const fundModal = document.getElementById('fundingModal');
@@ -76,9 +73,8 @@ const tagsPillsEl = document.getElementById('tagsPills');
 const OPT_FIELDS_KEY = 'bookish_active_fields';
 const OPTIONAL_FIELDS = ['notes','rating','owned','tags'];
 
-// --- Reading status ---
-const READING_STATUS = { WANT_TO_READ: 'want_to_read', READING: 'reading', READ: 'read' };
-const wtrTrigger = document.getElementById('wtrTrigger');
+// --- Reading status (constants imported from book_repository.js) ---
+const wtrCounter = document.getElementById('wtrCounter');
 const wtrOverlay = document.getElementById('wtrOverlay');
 const wtrBackdrop = document.getElementById('wtrBackdrop');
 const wtrDrawer = document.getElementById('wtrDrawer');
@@ -90,12 +86,6 @@ const wtrFooterAdd = document.getElementById('wtrFooterAdd');
 const statusSelector = document.getElementById('statusSelector');
 const readingStatusInput = document.getElementById('readingStatusInput');
 
-function normalizeReadingStatus(e) {
-  const s = e?.readingStatus;
-  if (s === READING_STATUS.WANT_TO_READ || s === READING_STATUS.READING || s === READING_STATUS.READ) return s;
-  return READING_STATUS.READ;
-}
-
 function showStatusToast(msg) {
   const existing = document.getElementById('bookishStatusToast');
   if (existing) existing.remove();
@@ -106,6 +96,39 @@ function showStatusToast(msg) {
   toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9001;';
   document.body.appendChild(toast);
   setTimeout(() => { toast.classList.add('hiding'); setTimeout(() => toast.remove(), 300); }, 2000);
+}
+
+const MARK_READ_UNDO_MS = 5500;
+
+/** Toast after marking a currently-reading book as read; Undo restores prior fields via BookRepository. */
+function showMarkAsReadToastWithUndo(key, snapshot) {
+  const existing = document.getElementById('bookishStatusToast');
+  if (existing) existing.remove();
+  const toast = document.createElement('div');
+  toast.id = 'bookishStatusToast';
+  toast.className = 'toast status-toast status-toast-with-action';
+  toast.setAttribute('role', 'status');
+  toast.innerHTML = `<span class="toast-message">Marked as read</span><button type="button" class="toast-undo-btn">Undo</button>`;
+  toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9001;';
+  document.body.appendChild(toast);
+
+  let cleared = false;
+  const remove = () => {
+    if (cleared) return;
+    cleared = true;
+    toast.classList.add('hiding');
+    setTimeout(() => toast.remove(), 300);
+  };
+  const timer = setTimeout(remove, MARK_READ_UNDO_MS);
+
+  toast.querySelector('.toast-undo-btn')?.addEventListener('click', async () => {
+    if (cleared || !bookRepo) return;
+    cleared = true;
+    clearTimeout(timer);
+    await bookRepo.applyReadingSnapshot(key, snapshot);
+    toast.classList.add('hiding');
+    setTimeout(() => toast.remove(), 300);
+  });
 }
 
 function getActiveFields(){ try{ return JSON.parse(localStorage.getItem(OPT_FIELDS_KEY))||[]; }catch{ return []; } }
@@ -245,13 +268,11 @@ function clearCoverPreview(){ coverPreview.style.display='none'; coverPlaceholde
 function showCoverLoaded(){ if(coverRemoveBtn) coverRemoveBtn.style.display='inline-flex'; }
 
 // --- State ---
-let entries=[]; let replaying=false;
-const SERVERLESS=true;
+let entries=[];
 let browserClient; let keyState={ loaded:false };
 
-// Edit queue: tracks in-flight edits and pending follow-up edits
-// Key: bookId or entryId, Value: { uploading: boolean, pendingPayload: payload|null }
-const editQueue = new Map();
+// Book repository — single owner of all book data operations
+let bookRepo = null;
 
 // Export reset function for logout
 export function resetKeyState() {
@@ -260,23 +281,6 @@ export function resetKeyState() {
 }
 let walletError = null; // Track wallet errors for UI status manager
 window.BOOKISH_DEBUG=true; function dbg(...a){ if(window.BOOKISH_DEBUG) console.debug('[Bookish]',...a); }
-
-// --- Superuser mode ---
-const SU_KEY = 'bookish_superuser';
-function isSuperuser(){ return document.body.hasAttribute('data-superuser'); }
-function setSuperuser(on){
-  if(on){
-    document.body.setAttribute('data-superuser','');
-    localStorage.setItem(SU_KEY,'true');
-    if(geekBtn) geekBtn.classList.add('superuser-active');
-  } else {
-    document.body.removeAttribute('data-superuser');
-    localStorage.removeItem(SU_KEY);
-    if(geekBtn) geekBtn.classList.remove('superuser-active');
-  }
-}
-// Restore superuser state on load
-if(localStorage.getItem(SU_KEY)==='true') setSuperuser(true);
 
 /**
  * Get balance status for UI status manager
@@ -416,7 +420,7 @@ function closeModal(){ modal.classList.remove('active'); const inner=modal.query
   const dateLabel = dateBlock?.querySelector('label');
   if(dateLabel) dateLabel.textContent='Completed';
   if(window.bookSearch) window.bookSearch.handleModalOpen(true); }
-function clearBooks(){ entries=[]; render(); }
+function clearBooks(){ if(bookRepo) bookRepo.clear(); else { entries=[]; render(); } }
 window.bookishApp={ openModal, clearBooks, showCoverLoaded, clearCoverPreview, render, changeReadingStatus };
 // Dirty tracking helpers
 function currentFormState(){ return JSON.stringify({
@@ -485,9 +489,7 @@ async function refreshFundingInfo(){
       try{
         const bytes = await (browserClient?.estimateEntryBytes?.(lastPendingOp.payload) || window.bookishEstimate?.entryBytes?.(lastPendingOp.payload));
         if(bytes){
-          const { PROTOCOL_CONFIG } = await import('./core/protocol_config.js');
-          const feeWei = BigInt(PROTOCOL_CONFIG.FLAT_FEE_WEI || '0');
-          fundCostEl.textContent = `${bytes} bytes — protocol fee ≈ ${(Number(feeWei)/1e18).toFixed(6)} ETH`;
+          fundCostEl.textContent = `${bytes} bytes — protocol fee $0.005 per upload`;
         }
       }catch{}
     }
@@ -594,19 +596,14 @@ export function showCelebrationToast(){
 }
 
 export function showAccountNudge(){
-  // Don't show if logged in
   if(storageManager.isLoggedIn()) return;
 
-  // Don't show if dismissed
-  const dismissed = localStorage.getItem('bookish.accountNudgeDismissed');
-  if(dismissed) return;
+  // Don't show if user has ever had an account (they know what it is)
+  if(localStorage.getItem('bookish.hasHadAccount') === 'true') return;
 
-  // Only show if 3+ books
+  if(localStorage.getItem('bookish.accountNudgeDismissed')) return;
+
   if(entries.length < 3) return;
-
-  // Hide the other account banner to avoid duplicates
-  const otherBanner = document.getElementById('accountBanner');
-  if(otherBanner) otherBanner.style.display='none';
 
   if(accountNudgeBanner){
     accountNudgeBanner.style.display='flex';
@@ -642,24 +639,24 @@ function markDeletingVisual(entry){ entry._deleting=true; entry._committed=false
 
 /** Build inner HTML for a single book card */
 function buildCardHTML(e){
-  const dotClass = (!e.txid) ? 'local' : (e.onArweave ? 'arweave' : 'syncing');
-  const dotTitle = (!e.txid) ? 'Local only' : (e.onArweave ? 'Saved to Arweave' : 'Uploaded \u2014 settling to Arweave\u2026');
   const dateDisp=formatDisplayDate(e.dateRead);
   const notesSnippet = e.notes ? `<p class="card-notes">${escapeHtml(e.notes)}</p>` : '';
   const metaStrip = buildCardMetadata(e);
   const coverDataUrl = e.coverImage ? `data:${e.mimeType||'image/jpeg'};base64,${e.coverImage}` : '';
   const rs = normalizeReadingStatus(e);
   const isReading = rs === READING_STATUS.READING;
-  const readingLabel = isReading ? '<div class="card-reading-label">◐ Reading</div>' : '';
+  const cardKey = e.txid || e.id || '';
+  const readingRow = isReading
+    ? `<div class="card-reading-label"><span class="card-reading-text">◐ Reading</span><button type="button" class="card-done-check" data-done-key="${escapeHtml(cardKey)}" title="Mark as read" aria-label="Mark as read">✓</button></div>`
+    : '';
   const showDate = !isReading && dateDisp;
   return `
-      <div class="status-dot ${dotClass}" data-tip="${dotTitle}"></div>
       <div class="cover"${coverDataUrl?` style="--cover-url:url('${coverDataUrl}')"`:''}>${e.coverImage?`<img src="${coverDataUrl}">`:`<div class="generated-cover" style="background:${generatedCoverColor(e.title||'')}"><span class="generated-title">${escapeHtml(e.title||'Untitled')}</span>${e.author?`<span class="generated-author">${escapeHtml(e.author)}</span>`:''}</div>`}</div>
       <div class="meta">
         <p class="title">${e.title||'<i>Untitled</i>'}</p>
         <p class="author">${e.author||''}</p>
         ${metaStrip}
-        <div class="details">${readingLabel}${showDate ? `<span class="read-date">Read ${dateDisp}</span>` : ''}</div>
+        <div class="details">${readingRow}${showDate ? `<span class="read-date">Read ${dateDisp}</span>` : ''}</div>
         ${notesSnippet}
       </div>`;
 }
@@ -703,13 +700,11 @@ function render(){
   // Main grid shows: reading first, then read
   const shelfEntries = [...readingList, ...readList];
 
-  // Update WTR trigger count
-  if(wtrTrigger){
+  if(wtrCounter){
     if(wantList.length > 0){
-      wtrTrigger.textContent = `${wantList.length} to read ↗`;
-      wtrTrigger.style.display = 'inline-flex';
+      wtrCounter.innerHTML = `My Reading List <span class="wtr-count">${wantList.length}</span>`;
     } else {
-      wtrTrigger.style.display = 'none';
+      wtrCounter.textContent = 'My Reading List';
     }
   }
 
@@ -742,30 +737,25 @@ function render(){
 
     if(cardsEl.children.length > 0) cardsEl.replaceChildren();
     emptyEl.style.display='block';
+    if(shelfEmptyEl) shelfEmptyEl.style.display = 'none';
+    if(actionBarEl) actionBarEl.style.display = 'none';
     hideAccountNudge();
     return;
   }
 
-  // If only WTR books exist but no shelf books, show a special empty state for the shelf
   if(!shelfEntries.length && wantList.length){
     if(cardsEl.children.length > 0) cardsEl.replaceChildren();
-    emptyEl.style.display='block';
-    const headline = emptyEl.querySelector('.empty-headline');
-    const subtext = emptyEl.querySelector('.empty-subtext');
-    const addBtn = emptyEl.querySelector('.empty-cta');
-    const signInDiv = document.getElementById('emptySignIn');
-    const illustration = emptyEl.querySelector('.empty-illustration');
-    if(headline) headline.textContent = 'Your shelf is empty';
-    if(subtext) subtext.textContent = 'You haven\'t finished any books yet. Open your Want to Read list to start one!';
-    if(addBtn) addBtn.style.display = '';
-    if(signInDiv) signInDiv.style.display = 'none';
-    if(illustration) illustration.textContent = '\uD83D\uDCDA';
-    if(storageManager.isLoggedIn()) hideAccountNudge(); else showAccountNudge();
+    emptyEl.style.display='none';
+    if(shelfEmptyEl) shelfEmptyEl.style.display = 'block';
+    if(actionBarEl) actionBarEl.style.display = '';
+    hideAccountNudge();
     return;
   }
 
   emptyEl.style.display='none';
-  if(storageManager.isLoggedIn()) hideAccountNudge(); else showAccountNudge();
+  if(shelfEmptyEl) shelfEmptyEl.style.display = 'none';
+  if(actionBarEl) actionBarEl.style.display = '';
+  if(storageManager.isLoggedIn()) hideAccountNudge();
 
   // --- Keyed DOM reconciliation ---
   const existingMap = new Map();
@@ -809,7 +799,14 @@ function render(){
       card.dataset._fp=fp;
       if(e._deleting){ card.style.pointerEvents='none'; card.style.opacity='0.35'; }
     }
-    card.onclick=()=>{ if(!e._deleting) openModal(e); };
+    card.onclick=(ev)=>{
+      if(e._deleting) return;
+      const path=typeof ev.composedPath==='function'?ev.composedPath():[];
+      for(const n of path){
+        if(n instanceof Element && n.classList?.contains('card-done-check')) return;
+      }
+      openModal(e);
+    };
     orderedCards.push(card);
   }
 
@@ -823,38 +820,23 @@ function render(){
     }
   }
 
-  setTimeout(updateBookDots, 0);
+  setTimeout(probePendingArweaveConfirmations, 0);
+}
+
+let _probeRenderScheduled = false;
+function scheduleRenderAfterProbe(){
+  if(_probeRenderScheduled) return;
+  _probeRenderScheduled = true;
+  queueMicrotask(() => { _probeRenderScheduled = false; render(); });
 }
 
 /**
- * Update book status dots with smart probing
- * Only probes entries that have txid but aren't confirmed on Arweave yet
+ * Probe Arweave for entries uploaded but not yet confirmed (no UI; updates cache + display).
  */
-async function updateBookDots(){
+function probePendingArweaveConfirmations(){
   for(const e of entries){
-    const card = cardsEl.querySelector(`.card[data-txid="${e.txid||e.id||''}"]`);
-    if(!card) continue;
-    const dot = card.querySelector('.status-dot');
-    if(!dot) continue;
-
-    // Set color based on current state
-    dot.classList.remove('local','syncing','arweave');
-
-    if(!e.txid) {
-      // Local only - not uploaded
-      dot.classList.add('local');
-      dot.dataset.tip = 'Local only';
-    } else if(e.onArweave) {
-      // Final state - on Arweave, stop checking
-      dot.classList.add('arweave');
-      dot.dataset.tip = 'Saved to Arweave';
-    } else {
-      dot.classList.add('syncing');
-      dot.dataset.tip = 'Uploaded \u2014 settling to Arweave\u2026';
-
-      // Probe in background (only for entries needing it)
-      probeAndUpdateDot(e, dot);
-    }
+    if(!e.txid || e.onArweave) continue;
+    probeAndUpdateEntry(e);
   }
 }
 
@@ -866,42 +848,34 @@ const probeBackoff = new Map(); // txid → { fails: number, lastAttempt: number
 const PROBE_BASE_MS = 60000;   // 60s base backoff
 const PROBE_MAX_MS  = 900000;  // 15 min max backoff
 
-/** Reset all probe backoff counters (called on Sync Now) */
-function resetProbeBackoff() { probeBackoff.clear(); }
-
 /**
  * Probe Arweave availability and update entry state
  * Uses exponential backoff per entry to avoid continuous error traffic
  */
-async function probeAndUpdateDot(entry, dot) {
+async function probeAndUpdateEntry(entry) {
   const txid = entry.txid;
   const state = probeBackoff.get(txid);
   if (state) {
     const backoff = Math.min(PROBE_BASE_MS * Math.pow(2, state.fails), PROBE_MAX_MS);
     if (Date.now() - state.lastAttempt < backoff) {
-      return; // Still in backoff window
+      return;
     }
   }
 
   try {
     const rec = await window.bookishNet?.probeAvailability?.(txid);
     if(rec?.arweave) {
-      // Reached Arweave - persist this flag so we stop probing
       entry.onArweave = true;
-      probeBackoff.delete(txid); // Success — clear backoff
+      probeBackoff.delete(txid);
       if(window.bookishCache) {
         await window.bookishCache.putEntry(entry);
       }
-      dot.classList.remove('syncing');
-      dot.classList.add('arweave');
-      dot.dataset.tip = 'Saved to Arweave';
+      scheduleRenderAfterProbe();
     } else {
-      // Not on Arweave yet — increment backoff
       const prev = probeBackoff.get(txid) || { fails: 0, lastAttempt: 0 };
       probeBackoff.set(txid, { fails: prev.fails + 1, lastAttempt: Date.now() });
     }
   } catch(err) {
-    // Probe failed — increment backoff
     const prev = probeBackoff.get(txid) || { fails: 0, lastAttempt: 0 };
     probeBackoff.set(txid, { fails: prev.fails + 1, lastAttempt: Date.now() });
     console.debug('[Bookish] Arweave probe failed for', txid, err);
@@ -943,11 +917,12 @@ function renderWtrDrawer(wantList){
   }).join('');
 }
 
-wtrTrigger?.addEventListener('click', openWtrDrawer);
+wtrCounter?.addEventListener('click', openWtrDrawer);
 wtrBackdrop?.addEventListener('click', closeWtrDrawer);
 wtrClose?.addEventListener('click', closeWtrDrawer);
 wtrAddBtn?.addEventListener('click', ()=>{ closeWtrDrawer(); openModal(null, READING_STATUS.WANT_TO_READ); });
 wtrFooterAdd?.addEventListener('click', ()=>{ closeWtrDrawer(); openModal(null, READING_STATUS.WANT_TO_READ); });
+document.getElementById('shelfEmptyBrowse')?.addEventListener('click', openWtrDrawer);
 
 // WTR drawer event delegation: "Start Reading" + row tap
 wtrListEl?.addEventListener('click', (ev)=>{
@@ -966,6 +941,27 @@ wtrListEl?.addEventListener('click', (ev)=>{
   }
 });
 
+// Mark as read (checkmark) on Currently Reading cards — toast with Undo
+cardsEl?.addEventListener('click', (ev)=>{
+  const doneBtn = ev.target.closest('.card-done-check');
+  if(doneBtn){
+    ev.stopPropagation();
+    ev.preventDefault();
+    const key = doneBtn.dataset.doneKey;
+    if(!key || !bookRepo) return;
+    const entry = bookRepo.getById(key);
+    if(!entry || normalizeReadingStatus(entry) !== READING_STATUS.READING) return;
+    const snapshot = {
+      readingStatus: READING_STATUS.READING,
+      dateRead: entry.dateRead || '',
+      readingStartedAt: entry.readingStartedAt
+    };
+    bookRepo.changeStatus(key, READING_STATUS.READ).then((result) => {
+      if (result) showMarkAsReadToastWithUndo(key, snapshot);
+    });
+  }
+});
+
 // ESC closes WTR drawer
 document.addEventListener('keydown', (e)=>{
   if(e.key === 'Escape' && wtrOverlay && wtrOverlay.style.display !== 'none'){
@@ -981,75 +977,11 @@ statusSelector?.addEventListener('click', (ev)=>{
   updateDirty();
 });
 
-// --- Change reading status (optimistic UI) ---
+// --- Change reading status (delegates to BookRepository) ---
 async function changeReadingStatus(key, newStatus){
-  const entry = entries.find(e => (e.txid||e.id) === key);
-  if(!entry) return;
-  const oldStatus = normalizeReadingStatus(entry);
-  entry.readingStatus = newStatus;
-  if(newStatus === READING_STATUS.READING && oldStatus !== READING_STATUS.READING){
-    entry.readingStartedAt = Date.now();
-  }
-  if(newStatus === READING_STATUS.READ && !entry.dateRead){
-    entry.dateRead = new Date().toISOString().slice(0,10);
-  }
-  if(window.bookishCache) await window.bookishCache.putEntry(entry);
-  markDirty();
-  orderEntries(); render();
-
-  const msg = newStatus === READING_STATUS.READING ? 'Moved to Currently Reading'
-    : newStatus === READING_STATUS.READ ? 'Finished! Added to your shelf'
-    : 'Moved to Want to Read';
-  showStatusToast(msg);
-
-  // Background upload if logged in
-  if(entry.txid && browserClient){
-    const payload = { title:entry.title, author:entry.author, format:entry.format, dateRead:entry.dateRead||'', readingStatus:newStatus, bookId:entry.bookId };
-    if(entry.coverImage){ payload.coverImage=entry.coverImage; if(entry.mimeType) payload.mimeType=entry.mimeType; }
-    if(entry.notes) payload.notes=entry.notes;
-    if(entry.rating) payload.rating=entry.rating;
-    if(entry.owned) payload.owned=entry.owned;
-    if(entry.tags) payload.tags=entry.tags;
-    if(entry.readingStartedAt) payload.readingStartedAt=entry.readingStartedAt;
-    editServerless(entry.txid, payload).catch(()=>{ walletError='Status update failed'; uiStatusManager.refresh(); });
-  }
-}
-
-// --- Diagnostics status line (inside geek panel) ---
-let diagItems=[]; let diagTimer=null; let diagIdx=0;
-let diagTickTimer=null; let diagIdle=true;
-function diagRender(){
-  if(!geekStatusLine) return;
-  if(!diagItems.length){ geekStatusLine.textContent=''; return; }
-  geekStatusLine.textContent = String(diagItems[diagIdx % diagItems.length]);
-}
-function diagSet(items){
-  diagItems = Array.isArray(items) ? items.filter(Boolean) : (items?[String(items)]:[]);
-  diagIdx=0; diagRender();
-  if(diagTimer) clearInterval(diagTimer);
-  if(diagItems.length>1){ diagTimer=setInterval(()=>{ diagIdx=(diagIdx+1)%diagItems.length; diagRender(); }, 2500); }
-  diagIdle=false;
-}
-function diagClear(){ diagItems=[]; if(diagTimer) clearInterval(diagTimer); diagTimer=null; diagRender(); diagIdle=true; }
-function diagMaybeSet(items){ diagSet(items); }
-function diagMaybeClear(){ diagClear(); }
-
-function fmtCountdown(ms){ if(ms<=0) return 'now'; const s=Math.ceil(ms/1000); return s+'s'; }
-function diagIdleSeed(){
-  // If nothing active, show countdowns for next sync and next probe
-  const now=Date.now();
-  const nextSyncAt = (window.bookishNextSyncAt||0);
-  const syncIn = Math.max(0, nextSyncAt - now);
-  const nextProbeAt = (window.bookishNet?.nextProbeAt)||0;
-  const probeIn = Math.max(0, nextProbeAt - now);
-  const inflightAr = (window.bookishNet?.arweaveInFlight)||0;
-  const probePart = inflightAr>0 ? 'Probing Arweave now...' : (probeIn<=0 ? 'Probing Arweave now...' : `Next Arweave probe in ${fmtCountdown(probeIn)}`);
-  const syncStatus = window.bookishSyncManager?.getSyncStatus?.();
-  const isSyncing = syncStatus?.isSyncing;
-  const syncPart = isSyncing ? 'Syncing...' : `Next sync in ${fmtCountdown(syncIn)}`;
-  const line = `${syncPart}; ${probePart}`;
-  // Do not flip to active; keep idle mode and recompute every tick
-  diagItems=[line]; diagRender();
+  if (!bookRepo) return;
+  const result = await bookRepo.changeStatus(key, newStatus);
+  if (result?.toastMessage) showStatusToast(result.toastMessage);
 }
 
 // --- Key handling ---
@@ -1061,374 +993,39 @@ async function ensureKeys(){
   try { const sym=localStorage.getItem('bookish.sym'); if(window.createBrowserClient){ browserClient=await window.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } else if(window.bookishBrowserClient){ browserClient=await window.bookishBrowserClient.createBrowserClient({ symKeyHex:sym, appName:'bookish', schemaVersion:'0.1.0', keyId:'default' }); } if(!browserClient){ setStatus('Client loading...'); return false; } keyState.loaded=true; const addr=await browserClient.address(); setStatus('EVM '+(addr?addr.slice(0,8)+'...':'ready')); return true; } catch(e){ console.error(e); setStatus('Key load error'); return false; }
 }
 
-// --- Arweave queries ---
-async function serverlessFetchEntries(){
-  if(!browserClient) return { entries:[], tombstones:[] };
+// --- Book data operations (delegated to BookRepository) ---
 
-  // Step 1: Query GraphQL for all transactions
-  const owner=null; let allEdges=[]; let cursor=undefined; let safety=0; const PAGE=50;
-  console.log('[Bookish] Querying Arweave GraphQL for book entries...');
-  const queryStart = Date.now();
-  for(;;){
-    const { edges, pageInfo } = await browserClient.searchByOwner(owner,{limit:PAGE,cursor});
-    allEdges.push(...edges);
-    if(!pageInfo.hasNextPage) break;
-    cursor=edges[edges.length-1]?.cursor;
-    if(++safety>40) break;
-  }
-  console.log('[Bookish] GraphQL query completed in', Date.now() - queryStart, 'ms, found', allEdges.length, 'transactions');
-
-  const { liveEdges, tombstones } = browserClient.computeLiveSets(allEdges);
-  console.log('[Bookish] After filtering:', liveEdges.length, 'live entries,', tombstones.length, 'tombstones');
-
-  // Step 2: Check which txids we already have cached with seenRemote flag
-  const cachedEntries = window.bookishCache ? await window.bookishCache.listAllRaw() : [];
-  const confirmedTxids = new Set(
-    cachedEntries
-      .filter(e => e.txid && e.seenRemote && e.status === 'confirmed')
-      .map(e => e.txid)
-  );
-  const needsDecrypt = liveEdges.filter(e => !confirmedTxids.has(e.node.id));
-  const alreadySynced = liveEdges.filter(e => confirmedTxids.has(e.node.id));
-
-  console.log('[Bookish] Cache check:', alreadySynced.length, 'already synced,', needsDecrypt.length, 'need decrypt');
-  // Track cache hits for geek panel
-  window.bookishNet = window.bookishNet || { reads:{ arweave:0, turbo:0, errors:0 }, cacheHits:0 };
-  window.bookishNet.cacheHits = (window.bookishNet.cacheHits || 0) + alreadySynced.length;
-
-  // Step 3: Decrypt entries that aren't fully synced in cache
-  const hydrated = [];
-  const decryptStart = Date.now();
-  const prevTag = (edge) => edge.node.tags?.find(t => t.name === 'Prev')?.value;
-  for(const e of needsDecrypt){
-    try{
-      const dec = await browserClient.decryptTx(e.node.id);
-      const prevTxid = prevTag(e);
-      hydrated.push({ txid:e.node.id, ...dec, block:e.node.block, ...(prevTxid && { prevTxid }) });
-    }catch(err){
-      console.warn('[Bookish] Failed to decrypt', e.node.id, err);
-    }
-  }
-
-  // Step 4: For already-synced entries, use cached data with updated block info
-  for(const e of alreadySynced) {
-    const cached = cachedEntries.find(c => c.txid === e.node.id);
-    if (cached) {
-      const prevTxid = prevTag(e);
-      hydrated.push({
-        ...cached,
-        block: e.node.block, // Update block info if changed
-        ...(prevTxid && { prevTxid })
-      });
-    }
-  }
-
-  console.log('[Bookish] Decrypted', needsDecrypt.length, 'entries in', Date.now() - decryptStart, 'ms');
-  
-  // Step 5: Deduplicate by bookId (safety net if Prev chain is broken)
-  // Keep newest version of each book (no block = most recent)
-  const byBookId = new Map();
-  const entryScore = (e) => {
-    // Higher score = keep this one
-    // No block = not yet in an Arweave block = most recent
-    // Otherwise, higher block height = more recent
-    if (!e.block || !e.block.height) return Infinity;
-    return e.block.height;
-  };
-  for (const entry of hydrated) {
-    if (!entry.bookId) continue;
-    const existing = byBookId.get(entry.bookId);
-    if (!existing) {
-      byBookId.set(entry.bookId, entry);
-    } else {
-      // Keep the one with higher score (more recent)
-      if (entryScore(entry) > entryScore(existing)) {
-        console.log('[Bookish] Dedup by bookId: keeping', entry.txid?.slice(0,8), 'over', existing.txid?.slice(0,8), 'for book', entry.bookId?.slice(0,8));
-        byBookId.set(entry.bookId, entry);
-      }
-    }
-  }
-  // Include entries without bookId (shouldn't happen but be safe)
-  const dedupedHydrated = [...byBookId.values(), ...hydrated.filter(e => !e.bookId)];
-  
-  if (dedupedHydrated.length < hydrated.length) {
-    console.warn('[Bookish] Removed', hydrated.length - dedupedHydrated.length, 'duplicate entries by bookId');
-  }
-  
-  dedupedHydrated.sort((a,b)=>{ const da=a.dateRead||'0000-00-00'; const db=b.dateRead||'0000-00-00'; if(da!==db) return db.localeCompare(da); const ha=(a.block&&a.block.height)||0; const hb=(b.block&&b.block.height)||0; return hb-ha; });
-  return { entries:dedupedHydrated, tombstones };
+async function syncBooksFromArweave() {
+  if (!bookRepo) return;
+  await bookRepo.sync();
+  setTimeout(probePendingArweaveConfirmations, 50);
 }
 
-// --- Ops replay ---
-async function replayOps(){
-  if(replaying) return; replaying=true;
-  try{
-    // Skip replay if cache is disabled (IndexedDB unavailable)
-    if(!window.bookishCache) return;
-    const haveKeys = await ensureKeys();
-    if (!haveKeys) return;
-    const ops=await window.bookishCache.listOps();
-    if(!ops.length) return;
-  diagMaybeSet(['Replaying pending changes...']);
-    for(const op of ops){
-      if(op.type==='create'){
-        const local=entries.find(e=>e.id===op.localId);
-        if(!local){ await window.bookishCache.removeOp(op.id); continue; }
-        if(local.txid){ await window.bookishCache.removeOp(op.id); continue; }
-        try {
-          const res=await browserClient.uploadEntry(op.payload,{});
-          const oldId=local.id; local.txid=res.txid; local.id=res.txid; local.pending=false; local.status='confirmed'; local.seenRemote=true;
-          await window.bookishCache.replaceProvisional(oldId,local);
-          await window.bookishCache.removeOp(op.id);
-          setStatus('Republished '+(local.title||''));
-          orderEntries(); render();
-        } catch{
-          setStatus('Replay pending...');
-          diagMaybeSet(['Awaiting upload credit...','Will retry automatically']);
-          break;
-        }
-      } else if(op.type==='edit'){
-        const local=entries.find(e=>e.txid===op.priorTxid) || entries.find(e=>e.id===op.priorTxid);
-        if(!local){ await window.bookishCache.removeOp(op.id); continue; }
-        try {
-          op.payload.bookId=local.bookId;
-          const res=await browserClient.uploadEntry(op.payload,{ extraTags:[{name:'Prev',value:op.priorTxid}] });
-          const oldTxid=op.priorTxid; local.txid=res.txid; local.id=res.txid; local.pending=false; local.status='confirmed'; local.seenRemote=true;
-          await window.bookishCache.replaceProvisional(oldTxid,local);
-          await window.bookishCache.removeOp(op.id);
-          setStatus('Re-saved '+(local.title||''));
-          orderEntries(); render();
-        } catch{
-          setStatus('Replay pending...');
-          diagMaybeSet(['Awaiting upload credit...','Will retry automatically']);
-          break;
-        }
-      }
-    }
-  } finally {
-    replaying=false;
-    diagMaybeClear();
-  }
-}
-
-// --- Sync (now managed by sync_manager.js) ---
-async function syncBooksFromArweave(){
-  // Fast fail if cache is unavailable (IndexedDB error)
-  if(!window.bookishCache){
-    console.warn('[Bookish] Book sync skipped - cache unavailable');
-    return;
-  }
-
-  await replayOps();
-  const have = await ensureKeys();
-
-  if (!have) {
-    // Only load cached books if user is logged in
-    if (storageManager.isLoggedIn()) {
-      entries = await window.bookishCache.getAllActive();
-      console.log('[Bookish] Loaded', entries.length, 'books from cache (no keys)');
-      orderEntries();
-      render();
-    }
-    return;
-  }
-
-  console.log('[Bookish] Starting book sync from Arweave...');
-  const { entries: remoteEntries, tombstones } = await serverlessFetchEntries();
-  console.log('[Bookish] Fetched', remoteEntries.length, 'remote entries,', tombstones.length, 'tombstones');
-  if (window.BOOKISH_DEBUG) console.debug('[Bookish] fetched remote entries:', remoteEntries.length, 'tombstones:', tombstones.length);
-
-  const remote = remoteEntries.map(e => ({ ...e, status: 'confirmed', id: e.txid }));
-  entries = await window.bookishCache.applyRemote(remote, tombstones);
-  
-  // Compact duplicates (handles race conditions from quick edits)
-  await window.bookishCache.compactDuplicates();
-  entries = await window.bookishCache.getAllActive();
-  
-  entries.forEach(e => e._committed = true);
-  orderEntries();
-  render();
-
-  // Update dots after sync
-  setTimeout(updateBookDots, 50);
-}
-
-// --- Create / edit / delete ---
-async function createServerless(payload){ if(window.bookishCache){ const dup=await window.bookishCache.detectDuplicate(payload); if(dup){ uiStatusManager.refresh(); const el=cardsEl.querySelector('[data-txid="'+(dup.txid||dup.id)+'"]'); if(el){ el.scrollIntoView({behavior:'smooth',block:'center'}); el.classList.add('pulse'); setTimeout(()=>el.classList.remove('pulse'),1500);} return; } }
-  const localId='local-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
-  const createdAt=Date.now();
-  // Compute bookId up-front so the cache entry has it from the start.
-  // This enables bookId-based dedup in applyRemote even before the first upload.
-  // createdAt is included in the hash so re-reads of the same book get distinct IDs.
-  if(!payload.bookId && window.bookishBrowserClient?.deriveBookId){
-    try { payload.bookId = await window.bookishBrowserClient.deriveBookId({...payload, createdAt}); } catch{}
-  }
-  const rec={id:localId, txid:null, ...payload, createdAt, status:'pending', pending:true, seenRemote:false, onArweave:false, _committed:false};
-  entries.push(rec);
-  if(window.bookishCache) await window.bookishCache.putEntry(rec);
-  markDirty(); // Signal sync manager that local data changed
-  orderEntries(); render();
-
-  // Phase 2: First-book celebration
-  if(entries.length === 1){
-    showCelebrationToast();
-  }
-
-  // Phase 2: Account nudge after 3rd book
-  if(entries.length === 3){
-    showAccountNudge();
-  }
-  try {
-    // Ensure browser client is initialized
-    const haveKeys = await ensureKeys();
-    if (!haveKeys) {
-      // Not logged in — book saved locally, upload deferred until account exists
-      return;
-    }
-
-    // Ensure hidden EVM wallet exists before upload
-    if(window.bookishWallet?.ensure){ const ensured = await window.bookishWallet.ensure(); if(window.BOOKISH_DEBUG) console.debug('[Bookish] wallet ensure:', ensured, await window.bookishWallet.getAddress()); }
-    if(window.BOOKISH_DEBUG) console.debug('[Bookish] uploadEntry start');
-  diagMaybeSet(['Publishing to Arweave...','If funding is needed, you\'ll be prompted']);
-    const res=await browserClient.uploadEntry(payload,{});
-    if(window.BOOKISH_DEBUG) console.debug('[Bookish] uploadEntry ok:', res);
-    const oldId=rec.id; rec.txid=res.txid; rec.id=res.txid; rec.pending=false; rec.status='confirmed'; rec.seenRemote=true; rec.onArweave=false;
-    if(window.bookishCache) await window.bookishCache.replaceProvisional(oldId,rec);
-    walletError=null; // Clear any previous errors
-    orderEntries(); render(); uiStatusManager.refresh();
-  diagMaybeClear();
-    setTimeout(updateBookDots, 50);
-  } catch(e){
-    console.warn('[Bookish] uploadEntry error:', e);
-    if(e && e.code==='upload-required'){
-      const pending = { type:'create', localId:rec.id, payload };
-      if(window.bookishCache) await window.bookishCache.queueOp(pending);
-      lastPendingOp = pending;
-  walletError='Upload client missing. Refresh page and retry.'; uiStatusManager.refresh();
-  diagMaybeSet(['Upload client missing','Refresh page and retry']);
-    } else if(e && e.code==='post-fund-timeout'){
-      // We funded, but node hasn't credited yet. Keep the op queued and inform the user.
-      const pending = { type:'create', localId:rec.id, payload };
-      if(window.bookishCache) await window.bookishCache.queueOp(pending);
-      lastPendingOp = pending;
-      walletError='Funding sent. Credit pending (can take a few minutes). Try again shortly from Account.'; uiStatusManager.refresh();
-  diagMaybeSet(['Funding sent – awaiting credit','Retry from Account shortly']);
-    } else if(e && (e.code==='base-insufficient-funds' || e.code==='base-insufficient-funds-recent')){
-      // Wallet lacks L1 ETH to fund bundler; queue op and prompt manual top-up
-      const pending = { type:'create', localId:rec.id, payload };
-      if(window.bookishCache) await window.bookishCache.queueOp(pending);
-      lastPendingOp = pending;
-      walletError='Auto-fund blocked: Base wallet low on ETH. Add a small amount and retry from Account.'; uiStatusManager.refresh();
-  diagMaybeSet(['Base wallet low on ETH','Add a small amount, then retry']);
-    } else {
-      uiStatusManager.refresh();
-      await window.bookishCache.queueOp({ type:'create', localId:rec.id, payload });
-  diagMaybeSet(['Offline – queued for publish']);
-    }
-  }
-}
-async function editServerless(priorTxid, payload) {
-  const old = entries.find(e => e.txid === priorTxid) || entries.find(e => e.id === priorTxid);
-  if (!old) throw new Error('Entry not found');
-  
-  const entryKey = old.bookId || old.id;
-  const queueEntry = editQueue.get(entryKey);
-  
-  // Always update the local state immediately for responsive UI
-  const snapshot = { ...old };
-  Object.assign(old, payload);
-  old.pending = true;
-  old.status = 'pending';
-  old.seenRemote = false;
-  old._committed = false;
-  await window.bookishCache.putEntry(old);
-  markDirty();
-  orderEntries();
-  render();
-  
-  // If an upload is already in progress, queue this as the pending edit
-  if (queueEntry?.uploading) {
-    console.log('[Bookish] Edit queued - will upload after current edit completes');
-    queueEntry.pendingPayload = { ...payload, bookId: old.bookId };
-    return;
-  }
-  
-  // Start the upload chain
-  editQueue.set(entryKey, { uploading: true, pendingPayload: null });
-  
-  await doEditUpload(entryKey, old, priorTxid, { ...payload, bookId: old.bookId }, snapshot);
-}
-
-async function doEditUpload(entryKey, entry, prevTxid, payload, snapshot) {
-  if (!entry.txid && !prevTxid) {
-    // local-only entry — saved to cache, no upload needed
-    editQueue.delete(entryKey);
-    return;
-  }
-  
-  try {
-    const haveKeys = await ensureKeys();
-    if (!haveKeys) throw new Error('Cannot upload: encryption keys not available');
-    
-    diagMaybeSet(['Saving to Arweave\u2026']);
-    const res = await browserClient.uploadEntry(payload, { extraTags: [{ name: 'Prev', value: prevTxid }] });
-    
-    const oldTxid = prevTxid;
-    entry.txid = res.txid;
-    entry.id = res.txid;
-    entry.pending = false;
-    entry.status = 'confirmed';
-    entry.seenRemote = true;
-    await window.bookishCache.replaceProvisional(oldTxid, entry);
-    walletError = null;
-    orderEntries();
-    render();
+async function createServerless(payload) {
+  if (!bookRepo) return;
+  const result = await bookRepo.create(payload);
+  if (result.isDuplicate) {
     uiStatusManager.refresh();
-    diagMaybeClear();
-    
-    // Check if there's a pending edit waiting
-    const queueEntry = editQueue.get(entryKey);
-    if (queueEntry?.pendingPayload) {
-      console.log('[Bookish] Processing queued edit with new Prev:', res.txid.slice(0, 8));
-      const nextPayload = queueEntry.pendingPayload;
-      queueEntry.pendingPayload = null;
-      // Chain the next edit with the just-completed txid as Prev
-      await doEditUpload(entryKey, entry, res.txid, nextPayload, snapshot);
-    } else {
-      editQueue.delete(entryKey);
-    }
-  } catch (e) {
-    editQueue.delete(entryKey);
-    // Revert to snapshot on error
-    Object.assign(entry, snapshot);
-    await window.bookishCache.putEntry(entry);
-    orderEntries();
-    render();
-    
-    const pending = { type: 'edit', priorTxid: prevTxid, payload };
-    if (window.bookishCache) await window.bookishCache.queueOp(pending);
-    lastPendingOp = pending;
-    
-    if (e && e.code === 'upload-required') {
-      walletError = 'Upload client missing. Refresh page and retry.';
-      uiStatusManager.refresh();
-      diagMaybeSet(['Upload client missing', 'Refresh page and retry']);
-    } else if (e && e.code === 'post-fund-timeout') {
-      walletError = 'Funding sent. Credit pending (few minutes). Retry from Account shortly.';
-      uiStatusManager.refresh();
-      diagMaybeSet(['Funding sent – awaiting credit', 'Retry from Account shortly']);
-    } else if (e && (e.code === 'base-insufficient-funds' || e.code === 'base-insufficient-funds-recent')) {
-      walletError = 'Auto-fund blocked: Base wallet low on ETH. Top up and retry from Account.';
-      uiStatusManager.refresh();
-      diagMaybeSet(['Base wallet low on ETH', 'Add a small amount, then retry']);
-    } else {
-      walletError = 'Save failed';
-      uiStatusManager.refresh();
-      diagMaybeSet(['Save failed']);
-    }
+    const el = cardsEl.querySelector('[data-txid="' + (result.entry.txid || result.entry.id) + '"]');
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.classList.add('pulse'); setTimeout(() => el.classList.remove('pulse'), 1500); }
+    return;
   }
+  if (entries.length === 1) showCelebrationToast();
+  if (entries.length === 3) showAccountNudge();
 }
-async function deleteServerless(priorTxid){ const entry=entries.find(e=>e.txid===priorTxid) || entries.find(e=>e.id===priorTxid); if(!entry) return; markDeletingVisual(entry); uiStatusManager.refresh(); if(!entry.txid){ /* local-only entry — just remove from cache and entries */ if(window.bookishCache) await window.bookishCache.deleteById(entry.id); entries=entries.filter(e=>e!==entry); orderEntries(); render(); uiStatusManager.refresh(); return; } try { const haveKeys = await ensureKeys(); if (!haveKeys) throw new Error('Cannot delete: encryption keys not available'); await browserClient.tombstone(priorTxid,{ note:'user delete' }); entry.status='tombstoned'; entry.tombstonedAt=Date.now(); await window.bookishCache.putEntry(entry); entries=entries.filter(e=>e.status!=='tombstoned'); walletError=null; markDirty(); orderEntries(); render(); uiStatusManager.refresh(); } catch{ entry._deleting=false; render(); walletError='Delete failed'; uiStatusManager.refresh(); } }
+
+async function editServerless(priorTxid, payload) {
+  if (!bookRepo) return;
+  await bookRepo.update(priorTxid, payload);
+}
+
+async function deleteServerless(priorTxid) {
+  if (!bookRepo) return;
+  const entry = bookRepo.getById(priorTxid);
+  if (entry) markDeletingVisual(entry);
+  uiStatusManager.refresh();
+  await bookRepo.delete(priorTxid);
+}
 
 // --- Form handlers ---
 let _formSubmitting = false;
@@ -1444,7 +1041,7 @@ deleteBtn?.addEventListener('click', async ()=>{ const txid=form.priorTxid.value
 
 // header refresh removed; app auto-syncs
 
-newBtn?.addEventListener('click', ()=>openModal(null));
+newBtn?.addEventListener('click', ()=>openModal(null, READING_STATUS.WANT_TO_READ));
 
 // Phase 2: First-run experience event handlers
 emptyAddBookBtn?.addEventListener('click', ()=>openModal(null));
@@ -1459,10 +1056,6 @@ emptySignInBtn?.addEventListener('click', ()=>{
 nudgeDismissBtn?.addEventListener('click', ()=>{
   hideAccountNudge();
   localStorage.setItem('bookish.accountNudgeDismissed', 'true');
-  // Also suppress the other account banner so it doesn't reappear
-  localStorage.setItem('bookish_account_banner_dismissed', 'true');
-  const otherBanner = document.getElementById('accountBanner');
-  if(otherBanner) otherBanner.style.display='none';
 });
 
 nudgeCreateAccountBtn?.addEventListener('click', ()=>{
@@ -1475,13 +1068,40 @@ async function initCacheLayer(){
   try {
     await window.bookishCache.initCache();
 
-    // Always load cached books immediately for instant display
-    entries=await window.bookishCache.getAllActive();
-    entries.forEach(e=>{ e._committed=!!(e.status==='confirmed'&&e.seenRemote); });
+    // Create the BookRepository — single owner of all book data operations
+    bookRepo = new BookRepository({
+      cache: window.bookishCache,
+      ensureKeys,
+      getBrowserClient: () => browserClient,
+      getWalletAddress: async () => window.bookishWallet?.getAddress?.(),
+      ensureWallet: async () => { if (window.bookishWallet?.ensure) await window.bookishWallet.ensure(); },
+      deriveBookId: (payload) => window.bookishBrowserClient?.deriveBookId?.(payload),
+      onDirty: markDirty
+    });
+
+    // Wire repository events to UI
+    bookRepo.on('change', (repoEntries) => {
+      entries = repoEntries;
+      orderEntries();
+      render();
+      uiStatusManager.refresh();
+      // Show account nudge when 3+ books and logged out (on load or after add)
+      showAccountNudge();
+    });
+    bookRepo.on('error', ({ code, message, pendingOp }) => {
+      if (code) { walletError = message; if (pendingOp) lastPendingOp = pendingOp; }
+      else { walletError = null; }
+      uiStatusManager.refresh();
+    });
+    bookRepo.on('progress', (items) => {
+      if (items) dbg('sync progress:', items);
+    });
+
+    // Load cached books immediately for instant display
+    await bookRepo.loadFromCache();
     console.log('[Bookish] Loaded', entries.length, 'books from cache');
-    orderEntries();
-    render();
-    uiStatusManager.refresh();
+    // Show account nudge on load if 3+ books and logged out (per FIRST_RUN_EXPERIENCE.md)
+    showAccountNudge();
 
     // Initialize sync manager
     initSyncManager({
@@ -1502,12 +1122,21 @@ async function initCacheLayer(){
         }
       },
       updateBalance: (balanceETH) => {
-        // Delegate to account_ui if available
         if (window.accountUI?.updateBalanceDisplay) {
           window.accountUI.updateBalanceDisplay(balanceETH);
         }
       }
     });
+
+    // Ensure wallet is available before any sync cycle (prevents address:undefined race)
+    try {
+      await import('./wallet.js');
+      await window.bookishWallet?.ensure?.();
+      const addr = await window.bookishWallet?.getAddress?.();
+      if (addr) setStatus((statusEl.textContent ? statusEl.textContent + ' • ' : '') + 'EVM ' + addr.slice(0, 6) + '...');
+    } catch (e) {
+      console.warn('[Bookish] Wallet init failed (non-fatal):', e.message);
+    }
 
     // Only start sync loop if user is logged in
     if (storageManager.isLoggedIn()) {
@@ -1520,11 +1149,6 @@ async function initCacheLayer(){
     console.error('[Bookish] IndexedDB failed to initialize:', err);
     // Fail fast with clear error message
     walletError='Storage Error: IndexedDB unavailable'; uiStatusManager.refresh();
-    diagMaybeSet([
-      'IndexedDB Error - Cannot start app',
-      'Try: Clear browser data, use private mode, or different browser',
-      'Error: ' + (err.message || 'Internal error opening backing store')
-    ]);
     // Show error in UI
     if(emptyEl) {
       emptyEl.style.display='block';
@@ -1563,8 +1187,6 @@ async function initCacheLayer(){
 async function loadStatus(){ const have=await ensureKeys(); if(!have){ uiStatusManager.refresh(); return; } try { const owner=await browserClient.address(); uiStatusManager.refresh(); } catch{ walletError='Key error'; uiStatusManager.refresh(); } }
 
 // --- Init ---
-window.bookishNextSyncAt = Date.now() + 60000;
-
 // Ensure modal is closed on page load
 if(modal) {
   modal.classList.remove('active');
@@ -1581,73 +1203,15 @@ uiStatusManager.init({
   getBalanceStatus
 });
 
-loadStatus(); initCacheLayer(); // sync started in initCacheLayer
-// Initialize hidden EVM wallet (ensures presence once sym key exists) and show address hint
-(async function initWallet(){ try { await import('./wallet.js'); const ok = await (window.bookishWallet?.ensure?.()); const addr = await (window.bookishWallet?.getAddress?.()); if(addr){ setStatus((statusEl.textContent?statusEl.textContent+' • ':'')+'EVM '+addr.slice(0,6)+'...'); } } catch{} })();
+loadStatus(); initCacheLayer(); // wallet init + sync started in initCacheLayer
 // Initialize account UI
 (async function initAccount(){ try { const { initAccountUI } = await import('./account_ui.js'); await initAccountUI(); } catch(e){ console.error('Failed to init account UI:', e); } })();
-window.addEventListener('online',()=>{ uiStatusManager.refresh(); replayOps(); });
+window.addEventListener('online',()=>{ uiStatusManager.refresh(); if(bookRepo) bookRepo.replayPending(); });
 
-// Expose sync manager methods for account UI
-window.bookishSyncManager = { getSyncStatus: getSyncStatusForUI, triggerPersistenceCheck };
+// Expose sync manager methods for account UI and release tests (triggerSyncNow)
+window.bookishSyncManager = { getSyncStatus: getSyncStatusForUI, triggerPersistenceCheck, triggerSyncNow };
 
-// --- Geek panel wiring (superuser toggle) ---
-function updateGeekPanel(){
-  if(!geekBody) return;
-  if(!storageManager.isLoggedIn()){
-    geekBody.textContent = 'Sign in to view sync status';
-    return;
-  }
-  const net = window.bookishNet || { reads:{ arweave:0, turbo:0, errors:0 }, cacheHits:0 };
-  const fetched = (net.reads.turbo||0) + (net.reads.arweave||0);
-  const cached = net.cacheHits || 0;
-  const errs = net.reads.errors || 0;
-  geekBody.textContent = `Fetched: ${fetched}  Cached: ${cached}  Err: ${errs}`;
-}
-window.updateGeekPanel = updateGeekPanel;
-
-function openSuperuser(){
-  setSuperuser(true);
-  if(geekPanel) geekPanel.style.display='block';
-  updateGeekPanel();
-  setTimeout(()=>{ if(typeof updateBookDots==='function') updateBookDots(); }, 10);
-  diagIdle=true; diagIdleSeed();
-  if(diagTickTimer) clearInterval(diagTickTimer);
-  diagTickTimer=setInterval(()=>{ if(diagIdle) diagIdleSeed(); else diagRender(); }, 1000);
-}
-function closeSuperuser(){
-  setSuperuser(false);
-  if(geekPanel) geekPanel.style.display='none';
-  diagClear(); if(diagTickTimer){ clearInterval(diagTickTimer); diagTickTimer=null; }
-  setTimeout(()=>{ if(typeof updateBookDots==='function') updateBookDots(); }, 10);
-}
-if(geekBtn && geekPanel && geekClose){
-  geekBtn.addEventListener('click',()=>{
-    if(isSuperuser()) closeSuperuser(); else openSuperuser();
-  });
-  geekClose.addEventListener('click',()=>{ closeSuperuser(); });
-  // Restore geek panel if superuser was already on
-  if(isSuperuser()) openSuperuser();
-}
-
-// --- Sync Now button (superuser-only) ---
-const syncNowBtn = document.getElementById('syncNowBtn');
-if (syncNowBtn) {
-  syncNowBtn.addEventListener('click', async () => {
-    syncNowBtn.disabled = true;
-    syncNowBtn.textContent = 'Syncing\u2026';
-    resetProbeBackoff(); // Clear all probe backoff counters
-    try {
-      await triggerSyncNow();
-    } catch (e) {
-      console.error('[Bookish] Sync Now error:', e);
-    } finally {
-      syncNowBtn.textContent = 'Sync';
-      // Prevent button spam — re-enable after 2s
-      setTimeout(() => { syncNowBtn.disabled = false; }, 2000);
-    }
-  });
-}
+window.updateBookDots = probePendingArweaveConfirmations;
 
 // --- Notes expand overlay ---
 const notesExpandBtn = document.getElementById('notesExpandBtn');

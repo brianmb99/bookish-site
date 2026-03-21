@@ -60,7 +60,7 @@ async function getWallet(){
   return new Wallet(parsed.privateKey, provider);
 }
 
-async function getBalance(){ const addr = await getAddress(); if(!addr) return null; const provider = getProvider(); const bal = await provider.getBalance(addr); return bal; }
+async function getBalance(){ const addr = await getAddress(); if(!addr) return null; const provider = getProvider(); return await provider.getBalance(addr); }
 
 async function signMessage(message){ const w = await getWallet(); return await w.signMessage(message); }
 

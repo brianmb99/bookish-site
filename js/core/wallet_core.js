@@ -4,9 +4,19 @@
 import { ethers } from 'https://esm.sh/ethers@6.13.0';
 import { WALLET_STORAGE_KEY } from './storage_constants.js';
 
-// Base mainnet network configuration
-const BASE_MAINNET_RPC = 'https://mainnet.base.org';
-const BASE_MAINNET_CHAIN_ID = 8453;
+const BASE_PRIMARY_RPC = 'https://mainnet.base.org';
+const BASE_FALLBACK_RPC = 'https://base.llamarpc.com';
+
+let _provider = null;
+let _usingFallback = false;
+
+function getProvider() {
+  if (!_provider) {
+    const url = _usingFallback ? BASE_FALLBACK_RPC : BASE_PRIMARY_RPC;
+    _provider = new ethers.JsonRpcProvider(url, 8453, { staticNetwork: true });
+  }
+  return _provider;
+}
 
 /**
  * Derive Ethereum wallet from BIP39 mnemonic seed
@@ -16,13 +26,8 @@ const BASE_MAINNET_CHAIN_ID = 8453;
  */
 export async function deriveWalletFromSeed(mnemonic) {
   try {
-    // Derive HD wallet from mnemonic (standard Ethereum path)
     const wallet = ethers.Wallet.fromPhrase(mnemonic);
-
-    return {
-      address: wallet.address,
-      wallet,
-    };
+    return { address: wallet.address, wallet };
   } catch (error) {
     console.error('Wallet derivation failed:', error);
     throw new Error(`Failed to derive wallet: ${error.message}`);
@@ -30,30 +35,29 @@ export async function deriveWalletFromSeed(mnemonic) {
 }
 
 /**
- * Get Base mainnet wallet balance (in ETH)
+ * Get Base mainnet native ETH balance with primary+fallback RPC
  * @param {string} address - Ethereum address
- * @returns {Promise<{balanceETH: string, balanceUSD: string}>}
+ * @returns {Promise<{balanceETH: string, ok: boolean}>} ok=true means RPC succeeded; ok=false means both RPCs failed
  */
 export async function getWalletBalance(address) {
-  try {
-    const provider = new ethers.JsonRpcProvider(BASE_MAINNET_RPC);
-    const balance = await provider.getBalance(address);
-    const balanceETH = ethers.formatEther(balance);
-
-    // For mainnet, USD value could be calculated with price oracle
-    // For now, returning $0 (price calculation is out of scope for Phase 1b)
-    return {
-      balanceETH,
-      balanceUSD: '0.00',
-    };
-  } catch (error) {
-    console.error('Balance fetch failed:', error);
-    // Return $0 on error (better than throwing)
-    return {
-      balanceETH: '0',
-      balanceUSD: '0.00',
-    };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const raw = await getProvider().getBalance(address);
+      return { balanceETH: ethers.formatEther(raw), ok: true };
+    } catch (error) {
+      _provider = null;
+      if (attempt === 0) {
+        continue;
+      }
+      if (attempt === 1 && !_usingFallback) {
+        _usingFallback = true;
+        continue;
+      }
+      console.warn('Balance fetch failed on both RPCs:', error.message || error);
+      return { balanceETH: '0', ok: false };
+    }
   }
+  return { balanceETH: '0', ok: false };
 }
 
 /**

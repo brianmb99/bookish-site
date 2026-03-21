@@ -28,7 +28,7 @@ const INTERVAL_IDLE_MS    = 300000;  // 5min — no writes for 5+ min
 const ACTIVE_WINDOW_MS    = 120000;  // 2min — how long Active lasts after a write
 const COOLING_WINDOW_MS   = 300000;  // 5min — how long Cooling lasts
 const BALANCE_THROTTLE_MS = 300000;  // 5min — skip balance RPC when confirmed
-const MIN_FUNDING_ETH = 0.00002;
+const MIN_FUNDING_ETH = 0.00002; // ~$0.04 at $2000/ETH
 
 // Callbacks for external modules
 let statusCallback = null;
@@ -113,7 +113,6 @@ export function startSync() {
   async function syncLoop() {
     await runSyncCycle();
     const delay = computeSyncInterval();
-    // Expose next-sync time for geek panel countdown
     window.bookishNextSyncAt = Date.now() + delay;
     syncInterval = setTimeout(syncLoop, delay);
   }
@@ -218,10 +217,12 @@ async function runSyncCycle() {
       }
     }
 
-    // Step 3: Mark sync as completed (only if no errors)
+    // Step 3: Mark initial sync as attempted (even on error) so the
+    // "Syncing your books..." loading state doesn't persist forever.
+    initialSynced = true;
+    transientSyncState.isRefreshing = false;
+
     if (!transientSyncState.error) {
-      initialSynced = true;
-      transientSyncState.isRefreshing = false;
       transientSyncState.justCompleted = true;
       transientSyncState.completedTime = Date.now();
 
@@ -230,8 +231,6 @@ async function runSyncCycle() {
         transientSyncState.justCompleted = false;
         if (statusCallback) statusCallback();
       }, 2000);
-    } else {
-      transientSyncState.isRefreshing = false;
     }
 
   } catch (error) {
@@ -242,15 +241,8 @@ async function runSyncCycle() {
     isSyncing = false;
     if (statusCallback) statusCallback();
 
-    // Update book status dots and geek panel after sync completes
     if (typeof window.updateBookDots === 'function') {
       window.updateBookDots();
-    }
-    if (typeof window.updateGeekPanel === 'function') {
-      const geekPanel = document.getElementById('geekPanel');
-      if (geekPanel && geekPanel.style.display !== 'none') {
-        window.updateGeekPanel();
-      }
     }
   }
 }
@@ -267,11 +259,13 @@ async function checkBalanceAndAutoPersist() {
   try {
     const accountState = getAccountPersistenceState();
 
-    // Balance throttle: skip RPC when confirmed and recently checked
+    // Balance throttle: skip RPC when confirmed, funded, and recently checked.
+    // Never throttle zero-balance accounts — faucet tx may be confirming.
     const now = Date.now();
+    const hasBalance = currentBalanceETH !== null && parseFloat(currentBalanceETH) > 0;
     const canThrottle = accountState === 'confirmed'
       && !forceBalanceCheck
-      && currentBalanceETH !== null
+      && hasBalance
       && (now - lastBalanceCheckAt) < BALANCE_THROTTLE_MS;
 
     if (canThrottle) {
@@ -298,7 +292,7 @@ async function checkBalanceAndAutoPersist() {
     }
 
     // Check if wallet just became funded (transition from underfunded to funded)
-    const isFunded = currentBalanceETH >= MIN_FUNDING_ETH;
+    const isFunded = parseFloat(currentBalanceETH || '0') >= MIN_FUNDING_ETH;
     const justFunded = isFunded && !previousFundingState;
     previousFundingState = isFunded;
 
@@ -402,6 +396,14 @@ export function triggerPersistenceCheck() {
 /**
  * Reset auto-persistence trigger (for testing)
  */
+/**
+ * Mark initial sync as already done (e.g. brand-new account with no books).
+ * Prevents the "Syncing your books…" empty state for new accounts.
+ */
+export function markInitialSyncDone() {
+  initialSynced = true;
+}
+
 export function resetAutoPersistenceTrigger() {
   autoPersistenceTriggered = false;
   previousFundingState = false;

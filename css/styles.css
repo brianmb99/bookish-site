@@ -24,9 +24,9 @@
   --color-success:#10b981;
   --color-warning:#eab308;
   --color-error:#ef4444;
-  --color-spine-1:#8b5cf6;
-  --color-spine-2:#10b981;
-  --color-spine-3:#f59e0b;
+  /* Single shelf spine (read / neutral); "reading" cards override in .card[data-reading] */
+  --color-spine-read:#3d3630;
+  --color-spine-read-mid:#322c27;
 }
 body{
   font-family:var(--font-body);
@@ -217,9 +217,7 @@ button.secondary:hover, .btn.secondary:hover{
   transition:opacity .3s ease;
   z-index:1;
 }
-.card[data-fmt='audio']:before{background:linear-gradient(180deg,var(--color-spine-1) 0%,#6366f1 100%);}
-.card[data-fmt='ebook']:before{background:linear-gradient(180deg,var(--color-spine-2) 0%,#059669 100%);}
-.card[data-fmt='print']:before{background:linear-gradient(180deg,var(--color-spine-3) 0%,#d97706 100%);}
+.card[data-fmt]:before{background:linear-gradient(180deg,var(--color-spine-read) 0%,var(--color-spine-read-mid) 100%);}
 .card:hover[data-fmt]:before{
   opacity:1;
 }
@@ -366,6 +364,35 @@ button.secondary:hover, .btn.secondary:hover{
 .empty-signin .link-btn{background:none;border:none;color:var(--color-text-secondary);font-size:inherit;font-family:inherit;cursor:pointer;padding:0;text-decoration:none;transition:color .2s}
 .empty-signin .link-btn:hover{color:var(--color-text-primary);text-decoration:underline;text-underline-offset:2px}
 
+/* Shelf-empty state (has WTR books but no shelf books) */
+.shelf-empty{
+  text-align:center;
+  padding:40px 20px;
+  color:var(--color-text-muted);
+}
+.shelf-empty-text{
+  font-size:.9rem;
+  line-height:1.5;
+  margin:0 0 12px;
+}
+.shelf-empty-link{
+  background:transparent!important;
+  border:none!important;
+  color:var(--color-text-secondary)!important;
+  font-size:.85rem!important;
+  font-weight:500!important;
+  cursor:pointer;
+  padding:8px 12px!important;
+  border-radius:6px!important;
+  transition:color .2s,background .2s;
+  font-family:var(--font-body);
+  box-shadow:none!important;
+}
+.shelf-empty-link:hover{
+  color:var(--color-primary)!important;
+  background:var(--color-bg-surface)!important;
+}
+
 /* --- Reading Status: shelf-first, queue-behind --- */
 
 /* Reading card accent — always-on spine glow */
@@ -374,11 +401,68 @@ button.secondary:hover, .btn.secondary:hover{
   background:linear-gradient(180deg,var(--color-primary) 0%,var(--color-primary-hover) 100%)!important;
   box-shadow:0 0 8px 1px rgba(59,130,246,.2);
 }
-.card-reading-label{font-size:.7rem;color:var(--color-primary);opacity:.85;display:flex;align-items:center;gap:4px}
+.card-reading-label{
+  font-size:.7rem;
+  color:var(--color-primary);
+  opacity:.85;
+  display:flex;
+  flex-direction:row;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+.card-reading-text{flex:0 1 auto;line-height:1.2}
+.card-done-check{
+  font-size:.8rem;
+  line-height:1;
+  color:var(--color-text-muted);
+  cursor:pointer;
+  padding:12px;
+  margin:-12px -12px -12px 0;
+  border-radius:6px;
+  transition:color .15s,background .15s;
+  font-weight:600;
+  font-family:var(--font-body);
+  background:transparent;
+  border:none;
+  min-width:44px;
+  min-height:44px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow:none;
+}
+.card-done-check:hover{
+  color:var(--color-success);
+  background:rgba(16,185,129,.12);
+}
 
-/* WTR trigger in header */
-.wtr-trigger{font-size:.8rem;color:var(--color-text-secondary);cursor:pointer;transition:color .2s,background .2s,border-color .2s;padding:6px 10px;border-radius:6px;background:transparent;border:none;border-bottom:2px solid rgba(74,144,226,.25);font-weight:500;font-family:var(--font-body);min-height:auto;box-shadow:none}
-.wtr-trigger:hover{color:var(--color-primary);background:var(--color-bg-surface);border-bottom-color:var(--color-primary)}
+/* Action bar (+ To Read button and counter) */
+.action-bar{display:flex;gap:8px;margin:4px 0 12px;align-items:center}
+.wtr-counter{
+  background:transparent!important;
+  border:1px solid var(--color-border-default)!important;
+  color:var(--color-text-secondary)!important;
+  font-size:.75rem!important;
+  font-weight:600!important;
+  padding:8px 14px!important;
+  border-radius:8px!important;
+  cursor:pointer;
+  transition:color .2s,background .2s,border-color .2s;
+  font-family:var(--font-body);
+  letter-spacing:.03em;
+  box-shadow:none;
+}
+.wtr-counter:hover{
+  background:var(--color-bg-elevated)!important;
+  border-color:var(--color-border-strong)!important;
+  color:var(--color-text-primary)!important;
+}
+.wtr-counter .wtr-count{
+  color:var(--color-primary);
+  font-weight:700;
+  margin-left:4px;
+}
 
 /* WTR drawer overlay */
 .wtr-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(2px);z-index:5000;animation:fadeIn .2s ease-out}
@@ -423,6 +507,26 @@ button.secondary:hover, .btn.secondary:hover{
 
 /* Status toast */
 .status-toast{background:var(--color-bg-elevated)!important;border:1px solid var(--color-success)!important;border-radius:8px;padding:12px 20px;font-size:.875rem;color:var(--color-text-primary)}
+.status-toast-with-action{display:flex!important;align-items:center;gap:16px;padding:12px 16px 12px 20px!important;flex-wrap:wrap;justify-content:center}
+.status-toast-with-action .toast-message{flex:0 1 auto}
+.toast-undo-btn{
+  margin:0;
+  padding:8px 14px;
+  min-height:40px;
+  border-radius:6px;
+  border:1px solid var(--color-border-default);
+  background:var(--color-bg-surface);
+  color:var(--color-text-primary);
+  font-size:.8125rem;
+  font-weight:600;
+  cursor:pointer;
+  flex-shrink:0;
+}
+.toast-undo-btn:hover{
+  background:var(--color-bg-deep);
+  border-color:var(--color-primary);
+  color:var(--color-primary);
+}
 
 /* Celebration toast */
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e3a5f;border:1px solid #2563eb;border-radius:12px;padding:12px 20px;display:flex;align-items:center;gap:10px;font-size:.9rem;color:#e2e8f0;box-shadow:0 4px 20px rgba(0,0,0,.3);z-index:9000;animation:slideUp .3s ease-out;max-width:calc(100vw - 48px)}
@@ -433,56 +537,15 @@ button.secondary:hover, .btn.secondary:hover{
 .celebration-toast{background:linear-gradient(135deg,#1e3a5f 0%,#1e293b 100%)}
 
 /* Account nudge banner */
-.account-banner{
-  background:linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%);
-  border:1px solid rgba(37,99,235,0.25);
-  border-radius:8px;
-  padding:12px 16px;
-  margin:16px;
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  font-size:0.875rem;
-  color:#e2e8f0;
-  animation:fadeIn .3s ease-out;
-  cursor:pointer;
-}
-.account-banner:hover{
-  background:linear-gradient(135deg, #253a5f 0%, #242b35 100%);
-  border-color:rgba(37,99,235,0.4);
-}
-.account-banner:focus-visible{
-  outline:2px solid var(--color-primary);
-  outline-offset:2px;
-}
-.account-banner-content{
-  display:flex;
-  align-items:center;
-  gap:8px;
-}
-.account-banner-dismiss{
-  background:none;
-  border:none;
-  color:#64748b;
-  font-size:1.25rem;
-  cursor:pointer;
-  padding:4px 8px;
-  border-radius:4px;
-  transition:color 0.2s, background 0.2s;
-}
-.account-banner-dismiss:hover{
-  color:#e2e8f0;
-  background:#334155;
-}
-.nudge-banner{background:var(--color-bg-surface);border:1px solid var(--color-border-subtle);border-radius:10px;padding:14px 16px;margin:16px 0;display:flex;align-items:center;justify-content:space-between;animation:fadeIn .3s ease-out}
+.nudge-banner{background:var(--color-bg-surface);border:1px solid var(--color-border-subtle);border-radius:10px;padding:14px 20px;margin:16px 0;display:flex;align-items:center;justify-content:center;gap:12px;animation:fadeIn .3s ease-out}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
-.nudge-content{display:flex;align-items:center;gap:12px}
-.nudge-icon{font-size:1.5rem}
-.nudge-text{display:flex;flex-direction:column;gap:4px}
+.nudge-content{display:flex;align-items:center;gap:10px}
+.nudge-icon{font-size:1.25rem;line-height:1}
+.nudge-text{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}
 .nudge-headline{font-size:.875rem;font-weight:500;color:#e2e8f0}
-.nudge-cta{font-size:.8rem;color:#60a5fa;text-decoration:none;background:none;border:none;padding:0;cursor:pointer}
+.nudge-cta{font-size:.875rem;color:#60a5fa;text-decoration:none;background:none;border:none;padding:0;cursor:pointer;white-space:nowrap}
 .nudge-cta:hover{color:#93c5fd;text-decoration:underline}
-.nudge-dismiss{background:transparent;border:none;color:#64748b;font-size:1.2rem;cursor:pointer;padding:4px 8px;border-radius:4px}
+.nudge-dismiss{background:transparent;border:none;color:#64748b;font-size:1.1rem;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1}
 .nudge-dismiss:hover{color:#94a3b8;background:#334155}
 /* Account modal styles */
 .modal-overlay{
@@ -613,6 +676,14 @@ button.secondary:hover, .btn.secondary:hover{
   background:var(--color-bg-elevated);
 }
 footer{margin-top:40px;font-size:.55rem;opacity:.4;text-align:center}
+/* Keep footer links readable: default :visited purple vanishes on dark bg at low opacity */
+footer a:link,
+footer a:visited{
+  color:inherit;
+}
+footer a:hover{
+  color:var(--color-text-secondary);
+}
 form.inline label{display:block;font-size:.65rem;margin-top:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 form.inline input,form.inline select,form.inline textarea{
   font-family:var(--font-body);
@@ -712,13 +783,12 @@ form.inline label{
 .secondary{background:var(--color-bg-elevated);color:var(--color-text-secondary);border:1px solid var(--color-border-default)}
 #entryForm input[type=file]{padding:4px;font-size:.65rem}
 img.preview{max-width:100%;border-radius:8px;margin-top:8px}
+/* Inline / account persistence indicator (not on book cards) */
 .status-dot{
-  position:absolute;
-  top:8px;
-  right:8px;
   width:10px;
   height:10px;
   border-radius:50%;
+  flex-shrink:0;
   transition:background .3s ease,transform .3s ease,box-shadow .3s ease;
 }
 .status-dot.local{
@@ -736,44 +806,6 @@ img.preview{max-width:100%;border-radius:8px;margin-top:8px}
 .status-dot.arweave{
   background:#059669;
   box-shadow:0 0 8px 2px rgba(5,150,105,.35);
-}
-/* Status dot CSS tooltip */
-.status-dot[data-tip]{
-  cursor:help;
-}
-.status-dot[data-tip]::after{
-  content:attr(data-tip);
-  position:absolute;
-  bottom:calc(100% + 6px);
-  right:0;
-  background:var(--color-bg-elevated);
-  color:var(--color-text-secondary);
-  font-family:var(--font-body);
-  font-size:.75rem;
-  white-space:nowrap;
-  padding:4px 8px;
-  border-radius:6px;
-  border:1px solid var(--color-border-default);
-  box-shadow:0 2px 8px rgba(0,0,0,.3);
-  opacity:0;
-  pointer-events:none;
-  transition:opacity .15s ease;
-  z-index:10;
-}
-.status-dot[data-tip]:hover::after{
-  opacity:1;
-}
-/* Superuser mode: hide book status dots by default, show only in superuser mode */
-body:not([data-superuser]) .card .status-dot{display:none}
-/* Sync Now button: visible only in superuser mode */
-body:not([data-superuser]) #syncNowBtn{display:none!important}
-body[data-superuser] #syncNowBtn{display:inline-flex!important}
-#syncNowBtn:disabled{opacity:.5;cursor:not-allowed}
-/* Gear icon active state when superuser mode is on */
-#geekBtn.superuser-active{
-  color:var(--color-accent)!important;
-  text-decoration:none!important;
-  text-shadow:0 0 8px rgba(245,158,11,.3);
 }
 .card.deleting{opacity:.35;filter:grayscale(.85)}
 /* book search UI */
@@ -837,6 +869,7 @@ body[data-superuser] #syncNowBtn{display:inline-flex!important}
   /* These use pseudo-element touch targets instead of bloated min-height */
   .refresh-link{min-height:auto!important;padding:6px 12px!important}
   #newBtn{min-height:42px;padding:10px 16px;font-size:.85rem}
+  .wtr-counter{min-height:42px!important;padding:10px 14px!important;font-size:.8rem!important}
   .search-controls button{min-height:auto;padding:6px 10px;font-size:.6rem}
   #editionNav button{min-height:auto;padding:6px 10px;font-size:.6rem}
   .cover-remove-btn{min-height:auto!important;padding:0!important}
@@ -1195,10 +1228,8 @@ body[data-superuser] #syncNowBtn{display:inline-flex!important}
 .date-picker td.today{outline:1px solid #2563eb}
 .date-picker td:hover{background:#2a323a}
 .date-picker td.selected{background:#2563eb;color:#fff}
-/* Source badges for search results */
-#bookSearchResults .src{display:inline-block;font-size:.5rem;padding:2px 4px;border-radius:4px;margin-left:4px;background:#2b333b;letter-spacing:.05em;font-weight:600}
-#bookSearchResults .src-it{background:#4b2e83}
-#bookSearchResults .src-ol{background:#374151}
+/* iTunes-sourced hits (shown first): subtle emphasis */
+#bookSearchResults .res-itunes{font-weight:600}
 #searchSortToggle .sort-btn{background:#2b333b;border:1px solid #374151;color:#9da6af;font-size:.55rem;padding:4px 6px;border-radius:4px;cursor:pointer;letter-spacing:.04em}
 #searchSortToggle .sort-btn.active{background:#2563eb;border-color:#2563eb;color:#fff}
 #searchSortToggle{justify-content:flex-end}
@@ -1210,22 +1241,6 @@ body[data-superuser] #syncNowBtn{display:inline-flex!important}
 @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 /* Search status message (progressive loading feedback) */
 .search-status{font-size:.6rem;padding:4px 8px;opacity:.5;border-bottom:1px solid #252d35;pointer-events:none}
-/* Compact geek panel */
-.geek-panel{margin:6px 0 10px;padding:6px 10px;border:1px solid var(--color-border-subtle);border-radius:8px;background:var(--color-bg-deep);color:var(--color-text-secondary);font-size:.7rem;font-family:var(--font-mono)}
-.geek-header{display:flex;align-items:center;gap:8px}
-.geek-title{font-family:var(--font-body);font-weight:600;font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;opacity:.5}
-.geek-stats{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.geek-close{background:transparent!important;border:none!important;color:var(--color-text-muted)!important;font-size:.85rem!important;padding:2px 6px!important;cursor:pointer;opacity:.5;min-height:auto!important}
-.geek-close:hover{opacity:1;color:var(--color-text-primary)!important}
-.geek-status-line{opacity:.55;margin-top:2px;min-height:1em;font-size:.6rem}
-/* Desktop: geek panel on one line */
-@media (min-width:600px){
-  .geek-panel{display:flex;align-items:center;gap:6px;padding:4px 10px}
-  .geek-header{flex-shrink:0}
-  .geek-status-line{margin:0;min-height:auto;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .geek-status-line::before{content:'|';margin-right:6px;opacity:.3}
-}
-
 /* Account modal styles */
 .modal-content{background:#1e242b;border:1px solid #2b333b;border-radius:16px;padding:20px;width:100%;max-width:420px;position:relative}
 /* Helper modal close button uses unified .modal-close-btn */
