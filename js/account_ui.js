@@ -243,6 +243,7 @@ async function renderAccountModalContent(container) {
       </div>
 
       <div class="account-actions" style="margin-top: 24px;">
+        ${!isFunded ? `<p style="font-size: 0.8rem; color: #94a3b8; margin: 0 0 12px 0; line-height: 1.5;">Back up your books permanently. A penny a book, no subscription.</p>` : ''}
         ${(() => {
           const buttonText = !isFunded ? 'Add Cloud Credit' : 'Add Credit';
           return `<button id="enableBackupBtn" class="btn primary" style="width: 100%; margin-bottom: 12px;">${buttonText}</button>`;
@@ -256,7 +257,8 @@ async function renderAccountModalContent(container) {
       <div class="account-data-section" style="margin-top: 24px; padding-top: 20px; border-top: 1px solid #334155;">
         <h3 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #94a3b8;">Your Data</h3>
         <button id="exportBooksBtn" type="button" class="btn secondary" style="width: 100%; margin-bottom: 8px;">📥 Export my books</button>
-        <p style="font-size: 0.75rem; color: #64748b; margin: 8px 0 0 0; line-height: 1.5;">Your books are stored locally and encrypted. Only you can access them.</p>
+        <p style="font-size: 0.75rem; color: #64748b; margin: 4px 0 0 0; line-height: 1.5;">Export books from this device as CSV.</p>
+        <a href="/forever.html" target="_blank" rel="noopener" style="font-size: 0.75rem; color: #60a5fa; display: inline-block; margin-top: 6px;">Export from cloud →</a>
       </div>
     `;
 
@@ -284,7 +286,7 @@ async function renderAccountModalContent(container) {
       <h2>Account</h2>
 
       <p style="margin: 0 0 24px 0; line-height: 1.6; opacity: 0.9;">
-        Your books, on any device. Create an account to get started.
+        Your books, your data, on any device.
       </p>
 
       <div class="account-actions">
@@ -298,7 +300,7 @@ async function renderAccountModalContent(container) {
       <div class="account-data-section" style="margin-top: 24px; padding-top: 20px; border-top: 1px solid #334155;">
         <h3 style="margin: 0 0 12px 0; font-size: 0.9rem; color: #94a3b8;">Your Data</h3>
         <button id="exportBooksBtn" type="button" class="btn secondary" style="width: 100%; margin-bottom: 8px;">📥 Export my books</button>
-        <p style="font-size: 0.75rem; color: #64748b; margin: 8px 0 0 0; line-height: 1.5;">Export your local books as CSV. Works offline.</p>
+        <p style="font-size: 0.75rem; color: #64748b; margin: 4px 0 0 0; line-height: 1.5;">Export books from this device as CSV.</p>
       </div>
     `;
 
@@ -931,12 +933,12 @@ function showCreationFullSuccess(displayName, email) {
       <div class="success-check-animated" style="margin-bottom:16px;">✓</div>
       <h3 style="margin:0 0 12px 0;">You're all set, ${displayName}!</h3>
       <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 16px 0;">
-        Your account is ready. Sign in on any device with your email and password.
+        Sign in on any device with your email and password.
       </p>
       <div class="success-status-list">
+        <div class="status-item"><span class="status-dot"></span> Your data is private, encrypted, and belongs to you</div>
         <div class="status-item"><span class="status-dot"></span> Cloud backup: Active</div>
         <div class="status-item"><span class="status-dot"></span> Account recovery: On</div>
-        <div class="status-item">📚 Ready to save books!</div>
       </div>
       <button id="startBooksBtn" class="btn primary" style="width:100%;padding:14px 20px;">Start Adding Books →</button>
       <div class="signed-in-as">Signed in as ${email}</div>
@@ -966,7 +968,7 @@ function showCreationFallbackSuccess(displayName, email) {
       <div class="success-check-animated" style="margin-bottom:16px;">✓</div>
       <h3 style="margin:0 0 12px 0;">Account Created, ${displayName}!</h3>
       <p style="font-size:.875rem;line-height:1.6;color:var(--color-text-secondary);margin:0 0 16px 0;">
-        Your account works on this device.
+        Your data is private, encrypted, and belongs to you.
       </p>
       <div class="info-box">
         <div style="font-size:.875rem;line-height:1.5;">
@@ -1851,6 +1853,7 @@ function handleBuyTransak() {
  */
 function showFundingValueModal(address, isFunded = false) {
   let advancedExpanded = false;
+  let faqExpanded = false;
 
   // Adapt messaging based on funding status
   const title = isFunded ? 'Add Credit' : 'Make Your Books Permanent';
@@ -1871,9 +1874,20 @@ function showFundingValueModal(address, isFunded = false) {
       </div>
       <div style="background:#1e3a5f;border:1px solid #2563eb;border-radius:8px;padding:12px 16px;margin:0 0 24px 0;">
         <div style="font-size:.85rem;line-height:1.5;">
-          <strong>One-time cost: ~$5</strong><br>
-          <span style="opacity:.8;">(covers years of storage)</span>
+          <strong>A penny a book</strong><br>
+          <span style="opacity:.8;">no subscription · free to get started</span>
         </div>
+      </div>
+      <div style="margin:0 0 16px 0;">
+        <button id="toggleFaqBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.8rem;cursor:pointer;padding:0;">▸ Why is there a cost?</button>
+      </div>
+      <div id="faqSection" style="display:none;text-align:left;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:12px 16px;margin:0 0 16px 0;">
+        <div class="funding-faq-pair"><p class="funding-faq-q">What am I paying for?</p><p class="funding-faq-a">Your own permanent, encrypted storage. It costs about a penny per book — you only pay for what you use. No subscription, no monthly fee. Your first books are free.</p></div>
+        <div class="funding-faq-pair"><p class="funding-faq-q">How far does $5 go?</p><p class="funding-faq-a">A very long way. At a penny a book, $5 covers hundreds of books — a lifetime for most readers. If you eventually use your credit up, top up anytime at the same rate.</p></div>
+        <div class="funding-faq-pair"><p class="funding-faq-q">Why isn't it free?</p><p class="funding-faq-a">Because your books are yours — not ours. On most reading apps, the company owns your reading history and monetizes it. Here, we can't sell it or take it away. You pay a few dollars for storage instead of paying with your reading history.</p></div>
+        <div class="funding-faq-pair"><p class="funding-faq-q">What if I don't pay?</p><p class="funding-faq-a">Bookish works fine without paying. Your books stay on this device for free, forever. Cloud backup just means they're also safe if you lose this device, and accessible from your other devices.</p></div>
+        <div class="funding-faq-pair"><p class="funding-faq-q">Where does the money go?</p><p class="funding-faq-a">Most of it (~75%) goes directly to your storage credit. A small portion supports Bookish development.</p></div>
+        <div class="funding-faq-pair"><p class="funding-faq-q">Why Coinbase / crypto?</p><p class="funding-faq-a">Today, storage payments go through Coinbase because the underlying network uses cryptocurrency. We're adding card payments soon so you won't need to think about crypto at all.</p></div>
       </div>
       ` : `
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;text-align:left;">
@@ -1911,7 +1925,7 @@ function showFundingValueModal(address, isFunded = false) {
     openCoinbaseOnrampWithInstructions(address);
   };
 
-  // Toggle advanced section
+  // Toggle advanced section (close FAQ if open)
   document.getElementById('toggleAdvancedBtn').onclick = () => {
     advancedExpanded = !advancedExpanded;
     const advancedSection = document.getElementById('advancedSection');
@@ -1919,11 +1933,41 @@ function showFundingValueModal(address, isFunded = false) {
     if (advancedExpanded) {
       advancedSection.style.display = 'block';
       toggleBtn.textContent = '▾ Advanced: Send crypto directly';
+      if (faqExpanded) {
+        faqExpanded = false;
+        const faqSection = document.getElementById('faqSection');
+        const faqBtn = document.getElementById('toggleFaqBtn');
+        if (faqSection) faqSection.style.display = 'none';
+        if (faqBtn) faqBtn.textContent = '▸ Why is there a cost?';
+      }
     } else {
       advancedSection.style.display = 'none';
       toggleBtn.textContent = '▸ Advanced: Send crypto directly';
     }
   };
+
+  // Toggle FAQ section (close Advanced if open)
+  const toggleFaqBtn = document.getElementById('toggleFaqBtn');
+  if (toggleFaqBtn) {
+    toggleFaqBtn.onclick = () => {
+      faqExpanded = !faqExpanded;
+      const faqSection = document.getElementById('faqSection');
+      if (faqExpanded) {
+        faqSection.style.display = 'block';
+        toggleFaqBtn.textContent = '▾ Why is there a cost?';
+        if (advancedExpanded) {
+          advancedExpanded = false;
+          const advancedSection = document.getElementById('advancedSection');
+          const advancedBtn = document.getElementById('toggleAdvancedBtn');
+          if (advancedSection) advancedSection.style.display = 'none';
+          if (advancedBtn) advancedBtn.textContent = '▸ Advanced: Send crypto directly';
+        }
+      } else {
+        faqSection.style.display = 'none';
+        toggleFaqBtn.textContent = '▸ Why is there a cost?';
+      }
+    };
+  }
 
   // Copy address
   document.getElementById('copyAddressBtn').onclick = async () => {
