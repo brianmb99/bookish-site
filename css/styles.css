@@ -363,6 +363,10 @@ button.secondary:hover, .btn.secondary:hover{
 .empty-signin{margin-top:20px;font-size:.85rem;color:var(--color-text-muted)}
 .empty-signin .link-btn{background:none;border:none;color:var(--color-text-secondary);font-size:inherit;font-family:inherit;cursor:pointer;padding:0;text-decoration:none;transition:color .2s}
 .empty-signin .link-btn:hover{color:var(--color-text-primary);text-decoration:underline;text-underline-offset:2px}
+.empty-links{margin-top:16px;font-size:.8rem;color:var(--color-text-muted)}
+.empty-links span{opacity:.4;margin:0 2px}
+.empty-links a{color:var(--color-text-muted);text-decoration:none;transition:color .2s}
+.empty-links a:hover{color:var(--color-text-primary)}
 
 /* Shelf-empty state (has WTR books but no shelf books) */
 .shelf-empty{
@@ -549,10 +553,13 @@ button.secondary:hover, .btn.secondary:hover{
 .nudge-cta:hover{color:#93c5fd;text-decoration:underline}
 .nudge-dismiss{background:transparent;border:none;color:#64748b;font-size:1.1rem;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1}
 .nudge-dismiss:hover{color:#94a3b8;background:#334155}
-.funding-faq-pair{margin-bottom:16px}
-.funding-faq-pair:last-child{margin-bottom:0}
-.funding-faq-q{font-weight:600;font-size:.8rem;margin:0;color:#e2e8f0}
-.funding-faq-a{font-size:.8rem;margin:4px 0 0 0;opacity:.85;line-height:1.5;color:#cbd5e1}
+/* PWA install banner */
+.pwa-install-banner{background:var(--color-bg-surface);border:1px solid var(--color-border-subtle);border-radius:10px;padding:12px 16px;margin:12px 0;animation:fadeIn .3s ease-out}
+.pwa-install-content{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.pwa-install-text{font-size:.8rem;color:#e2e8f0;line-height:1.5}
+.pwa-install-text strong{font-weight:600}
+.pwa-install-dismiss{background:transparent;border:none;color:#64748b;font-size:1.1rem;cursor:pointer;padding:4px 8px;border-radius:4px;line-height:1;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center}
+.pwa-install-dismiss:hover{color:#94a3b8;background:#334155}
 /* Account modal styles */
 .modal-overlay{
   position:fixed;
@@ -681,15 +688,11 @@ button.secondary:hover, .btn.secondary:hover{
   color:var(--color-text-secondary);
   background:var(--color-bg-elevated);
 }
-footer{margin-top:40px;font-size:.55rem;opacity:.4;text-align:center}
-/* Keep footer links readable: default :visited purple vanishes on dark bg at low opacity */
-footer a:link,
-footer a:visited{
-  color:inherit;
-}
-footer a:hover{
-  color:var(--color-text-secondary);
-}
+footer{margin-top:40px;text-align:center}
+.footer-links{font-size:.7rem;color:var(--color-text-muted);opacity:.6}
+.footer-links a:link,.footer-links a:visited{color:var(--color-text-muted);text-decoration:none}
+.footer-links a:hover{color:var(--color-text-secondary)}
+.footer-meta{font-size:.55rem;opacity:.35;margin-top:4px}
 form.inline label{display:block;font-size:.65rem;margin-top:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
 form.inline input,form.inline select,form.inline textarea{
   font-family:var(--font-body);
