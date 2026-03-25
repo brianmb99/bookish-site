@@ -1909,8 +1909,8 @@ function showFundingValueModal(address, isFunded = false) {
 
   // Pay with Coinbase
   document.getElementById('payWithCoinbaseBtn').onclick = () => {
-    closeAccountModal();
-    showFundingProgress(address);
+    closeHelperModal();
+    showFundingProgress(address, isFunded);
     openCoinbaseOnrampWithInstructions(address);
   };
 
@@ -1952,18 +1952,25 @@ function showFundingValueModal(address, isFunded = false) {
  * Phase 3: Show progress modal during funding
  * @param {string} address - Wallet address
  */
-function showFundingProgress(address) {
+function showFundingProgress(address, isFunded) {
   let progressState = 'initiated'; // initiated, waiting, setting-up
+  window.__fundingIsFunded = isFunded; // Store for success callback
+
+  const title = isFunded ? 'Adding Credit...' : 'Setting Up Cloud Backup...';
+  const body = isFunded
+    ? 'Your credit will be added once payment is confirmed.'
+    : 'We\u2019ll automatically set up your permanent storage once payment is confirmed.';
+  const step3 = isFunded ? 'Adding credit' : 'Setting up storage';
 
   showAccountModal(`
     <div style="text-align:center;padding:20px 0;">
-      <h3 style="margin:0 0 16px 0;">Setting Up Cloud Backup...</h3>
+      <h3 style="margin:0 0 16px 0;">${title}</h3>
       <div style="font-size:3rem;margin:16px 0;opacity:.9;">⏳</div>
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;">
         Complete your purchase in the Coinbase window.
       </p>
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;">
-        We'll automatically set up your permanent storage once payment is confirmed.
+        ${body}
       </p>
       <div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:16px;margin:0 0 24px 0;text-align:left;">
         <div id="progressStep1" class="funding-progress-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:1;">
@@ -1973,7 +1980,7 @@ function showFundingProgress(address) {
           <span>○</span> <span>Waiting for confirmation...</span>
         </div>
         <div id="progressStep3" class="funding-progress-step" style="display:flex;align-items:center;gap:8px;font-size:.85rem;margin:8px 0;opacity:.5;">
-          <span>○</span> <span>Setting up storage</span>
+          <span>○</span> <span>${step3}</span>
         </div>
       </div>
       <button id="cancelFundingBtn" class="btn-link" style="background:none;border:none;color:#94a3b8;font-size:.875rem;cursor:pointer;">Cancel</button>
@@ -1987,7 +1994,12 @@ function showFundingProgress(address) {
       clearInterval(window.__fundingTimeoutCheck);
       window.__fundingTimeoutCheck = null;
     }
-    closeAccountModal();
+    // Stop fast balance polling
+    if (window.__fastPollInterval) {
+      clearInterval(window.__fastPollInterval);
+      window.__fastPollInterval = null;
+    }
+    closeHelperModal();
     // Reset button state
     const buyBtn = document.getElementById('buyCoinbaseBtn');
     if (buyBtn) {
@@ -1998,6 +2010,7 @@ function showFundingProgress(address) {
     window.__fundingProgressState = null;
     window.__updateFundingProgress = null;
     window.__fundingStartedAt = null;
+    window.__fundingIsFunded = null;
   };
 
   // Store progress state updater globally so Coinbase callbacks can update it
@@ -2008,17 +2021,14 @@ function showFundingProgress(address) {
   const timeoutCheck = setInterval(() => {
     const elapsed = Date.now() - window.__fundingStartedAt;
     if (elapsed > 5 * 60 * 1000) { // 5 minutes
-      const progressModal = document.getElementById('accountPanel');
-      if (progressModal && progressModal.style.display !== 'none') {
-        // Show reassurance message
-        const cancelBtn = document.getElementById('cancelFundingBtn');
-        if (cancelBtn) {
-          cancelBtn.insertAdjacentHTML('beforebegin', `
-            <p id="timeoutMessage" style="font-size:.8rem;opacity:.8;margin:16px 0;line-height:1.5;">
-              This can take a few minutes. We'll notify you when ready. You can close this and continue using the app.
-            </p>
-          `);
-        }
+      // Show reassurance message if cancel button is still visible
+      const cancelBtn = document.getElementById('cancelFundingBtn');
+      if (cancelBtn && !document.getElementById('timeoutMessage')) {
+        cancelBtn.insertAdjacentHTML('beforebegin', `
+          <p id="timeoutMessage" style="font-size:.8rem;opacity:.8;margin:16px 0;line-height:1.5;">
+            This can take a few minutes. We'll notify you when ready. You can close this and continue using the app.
+          </p>
+        `);
       }
     }
   }, 60000); // Check every minute
@@ -2068,20 +2078,25 @@ function showFundingProgress(address) {
 /**
  * Phase 3: Show success modal after funding completes
  */
-function showFundingSuccess() {
+function showFundingSuccess(isFunded) {
+  const title = isFunded ? 'Credit Added!' : 'Cloud Backup Enabled!';
+  const body = isFunded
+    ? 'Your cloud storage balance has been topped up.'
+    : 'Your books are now saved permanently and accessible from any device.';
+
   showAccountModal(`
     <div style="text-align:center;padding:20px 0;">
       <div class="success-checkmark" style="font-size:3rem;margin-bottom:16px;animation:scaleIn .3s ease-out;color:#10b981;">✓</div>
-      <h3 style="margin:0 0 12px 0;">Cloud Backup Enabled!</h3>
+      <h3 style="margin:0 0 12px 0;">${title}</h3>
       <p style="font-size:.875rem;line-height:1.6;opacity:.9;margin:0 0 24px 0;">
-        Your books are now saved permanently and accessible from any device.
+        ${body}
       </p>
       <button id="backToBooksBtn" class="btn" style="width:100%;padding:14px 20px;background:#2563eb;">Back to My Books</button>
     </div>
   `);
 
   document.getElementById('backToBooksBtn').onclick = () => {
-    closeAccountModal();
+    closeHelperModal();
   };
 }
 
@@ -2105,8 +2120,17 @@ async function handleBuyStorage() {
       return;
     }
 
-    // Use cached balance for instant display (non-blocking)
-    const cachedBalance = window.bookishSyncManager?.getSyncStatus?.()?.currentBalanceETH;
+    // Use cached balance, fall back to on-chain fetch if unavailable
+    let cachedBalance = window.bookishSyncManager?.getSyncStatus?.()?.currentBalanceETH;
+    if (cachedBalance === null || cachedBalance === undefined) {
+      try {
+        const { getWalletBalance } = await import('./core/wallet_core.js');
+        const { balanceETH } = await getWalletBalance(walletInfo.address);
+        cachedBalance = balanceETH;
+      } catch (err) {
+        console.warn('[Bookish:AccountUI] Could not fetch balance for isFunded check:', err);
+      }
+    }
     const isFunded = cachedBalance !== null && cachedBalance !== undefined && parseFloat(cachedBalance) >= 0.00002;
 
     // Show modal immediately with cached state
@@ -2191,21 +2215,22 @@ async function openCoinbaseOnrampWithInstructions(address) {
         window.__fastPollInterval = null;
         
         // Close progress modal and show simple confirmation
-        closeAccountModal();
+        closeHelperModal();
         setTimeout(() => {
+          const isFunded = window.__fundingIsFunded;
           showAccountModal(`
             <div style="text-align:center;padding:20px 0;">
               <div style="font-size:2.5rem;margin:16px 0;">✓</div>
-              <h3 style="margin:0 0 16px 0;">Funds Added</h3>
+              <h3 style="margin:0 0 16px 0;">${isFunded ? 'Credit Added!' : 'Funds Added'}</h3>
               <p style="font-size:.875rem;opacity:.9;margin:0 0 24px 0;">
                 Your balance has been updated.
               </p>
               <button id="fundingDoneBtn" class="btn" style="min-width:120px;">Done</button>
             </div>
           `);
-          document.getElementById('fundingDoneBtn').onclick = closeAccountModal;
+          document.getElementById('fundingDoneBtn').onclick = closeHelperModal;
         }, 300);
-        
+
         // Trigger a sync to update the cached balance
         if (window.bookishSyncManager?.triggerPersistenceCheck) {
           window.bookishSyncManager.triggerPersistenceCheck();
@@ -2293,74 +2318,56 @@ async function openCoinbaseOnrampWithInstructions(address) {
         buyBtn.textContent = '☁️ Enable Cloud Backup';
         buyBtn.disabled = false;
       }
-      
-      // Stop fast polling
-      if (window.__fastPollInterval) {
-        clearInterval(window.__fastPollInterval);
-        window.__fastPollInterval = null;
-      }
-      
+
       // If funds were already detected by fast polling, we're done
       if (window.__fastPollFundsDetected?.()) {
         console.log('[Bookish:AccountUI] Funds already detected, nothing more to do');
         return;
       }
-      
-      // Do one final balance check
-      const progressModal = document.getElementById('accountPanel');
-      if (progressModal && progressModal.style.display !== 'none') {
-        console.log('[Bookish:AccountUI] Doing final balance check...');
-        try {
-          const { getWalletBalance } = await import('./core/wallet_core.js');
-          const { balanceETH } = await getWalletBalance(address);
-          const currentCached = window.bookishSyncManager?.getSyncStatus?.()?.currentBalanceETH || '0';
 
-          if (parseFloat(balanceETH) > parseFloat(initialBalance)) {
-            // Funds arrived! Show simple confirmation
-            closeAccountModal();
-            setTimeout(() => {
-              showAccountModal(`
-                <div style="text-align:center;padding:20px 0;">
-                  <div style="font-size:2.5rem;margin:16px 0;">✓</div>
-                  <h3 style="margin:0 0 16px 0;">Funds Added</h3>
-                  <p style="font-size:.875rem;opacity:.9;margin:0 0 24px 0;">
-                    Your balance has been updated.
-                  </p>
-                  <button id="fundingDoneBtn" class="btn" style="min-width:120px;">Done</button>
-                </div>
-              `);
-              document.getElementById('fundingDoneBtn').onclick = closeAccountModal;
-            }, 300);
-            
-            // Trigger sync to update cached balance
-            if (window.bookishSyncManager?.triggerPersistenceCheck) {
-              window.bookishSyncManager.triggerPersistenceCheck();
-            }
-          } else {
-            // Funds not detected yet - show helpful message
-            closeAccountModal();
-            setTimeout(() => {
-              showAccountModal(`
-                <div style="text-align:center;padding:20px 0;">
-                  <div style="font-size:2rem;margin:16px 0;">⏳</div>
-                  <h3 style="margin:0 0 16px 0;">Processing</h3>
-                  <p style="font-size:.875rem;opacity:.9;margin:0 0 16px 0;line-height:1.6;">
-                    Your purchase is being processed. This usually takes a minute or two.
-                  </p>
-                  <p style="font-size:.8rem;opacity:.7;margin:0 0 24px 0;">
-                    Your balance will update automatically when funds arrive.
-                  </p>
-                  <button id="processingCloseBtn" class="btn" style="min-width:120px;">OK</button>
-                </div>
-              `);
-              document.getElementById('processingCloseBtn').onclick = closeAccountModal;
-            }, 300);
+      // Do one final balance check immediately
+      console.log('[Bookish:AccountUI] Doing final balance check...');
+      try {
+        const { getWalletBalance } = await import('./core/wallet_core.js');
+        const { balanceETH } = await getWalletBalance(address);
+
+        if (parseFloat(balanceETH) > parseFloat(initialBalance)) {
+          fundsDetected = true;
+          console.log('[Bookish:AccountUI] Funds detected on close! Balance increased from', initialBalance, 'to', balanceETH);
+          // Stop fast polling
+          if (window.__fastPollInterval) {
+            clearInterval(window.__fastPollInterval);
+            window.__fastPollInterval = null;
           }
-        } catch (err) {
-          console.error('[Bookish:AccountUI] Final balance check failed:', err);
-          // Just close the modal, sync will pick it up later
-          closeAccountModal();
+          // Show confirmation
+          closeHelperModal();
+          setTimeout(() => {
+            const isFunded = window.__fundingIsFunded;
+            showAccountModal(`
+              <div style="text-align:center;padding:20px 0;">
+                <div style="font-size:2.5rem;margin:16px 0;">✓</div>
+                <h3 style="margin:0 0 16px 0;">${isFunded ? 'Credit Added!' : 'Funds Added'}</h3>
+                <p style="font-size:.875rem;opacity:.9;margin:0 0 24px 0;">
+                  Your balance has been updated.
+                </p>
+                <button id="fundingDoneBtn" class="btn" style="min-width:120px;">Done</button>
+              </div>
+            `);
+            document.getElementById('fundingDoneBtn').onclick = closeHelperModal;
+          }, 300);
+
+          // Trigger sync to update cached balance
+          if (window.bookishSyncManager?.triggerPersistenceCheck) {
+            window.bookishSyncManager.triggerPersistenceCheck();
+          }
+        } else {
+          // Funds not detected yet — keep fast polling as backup (don't clear it)
+          // The fast poll will auto-close the modal when funds arrive, or timeout after 5 min
+          console.log('[Bookish:AccountUI] No balance change yet, fast poll continues in background');
         }
+      } catch (err) {
+        console.error('[Bookish:AccountUI] Final balance check failed:', err);
+        // Keep fast polling as fallback
       }
     }
   });
@@ -2523,14 +2530,16 @@ export async function handlePersistAccountToArweave(isAutoTrigger = false) {
           window.__fundingTimeoutCheck = null;
         }
         // Close progress modal and show success
-        closeAccountModal();
+        closeHelperModal();
+        const wasFunded = window.__fundingIsFunded;
         setTimeout(() => {
-          showFundingSuccess();
+          showFundingSuccess(wasFunded);
         }, 300);
         // Clear progress state
         window.__fundingProgressState = null;
         window.__updateFundingProgress = null;
         window.__fundingStartedAt = null;
+        window.__fundingIsFunded = null;
       }
     }, 2000);
 
