@@ -1,0 +1,882 @@
+// tarn_service.js — Singleton TarnClient wrapper for Bookish.
+//
+// Owns the singleton TarnClient instance, the schema declaration handed to
+// it, and the small amount of UI-side metadata that doesn't belong in the
+// SDK (active-fields preference, the email — for display only, never
+// re-used as auth material). Display name is Bookish app profile data:
+// encrypted through Tarn like books, with localStorage only as a cache.
+//
+// The new schema-first SDK does session resume internally — pass it a
+// storage adapter and `TarnClient.create()` rehydrates any persisted blob
+// before returning. We use TarnStorage.localStorage() so the at-rest blob
+// continues to live in localStorage exactly where it did before, just now
+// behind the SDK's own key (TarnStorage default key 'tarn:session:v1').
+//
+// Threat model unchanged: the persisted blob is opaque base64url ciphertext
+// encrypted under an origin-scoped, non-extractable AES-256-GCM key in
+// IndexedDB. An XSS attacker on this origin can drive the SDK to act as
+// the user up to the blob's hard expiry, but cannot exfiltrate the
+// wrapping key for off-origin replay. Credential change / recovery /
+// account delete clear the wrapping key and invalidate every previously-
+// emitted blob.
+
+import { TarnClient, TarnStorage } from '../lib/tarn/tarn-client.bundle.js';
+import { bookishSchema } from './bookish_schema.js';
+
+const TARN_API = window.BOOKISH_API_BASE || 'https://api.tarn.dev';
+const APP_ID = 'bookish';
+
+const STORAGE_KEYS = {
+  EMAIL: 'bookish.email',
+  DISPLAY_NAME: 'bookish.displayName',
+  PENDING_DISPLAY_NAME: 'bookish.pendingDisplayName',
+  ACTIVE_FIELDS: 'bookish_active_fields',
+};
+const PROFILE_ID = 'self';
+const MAX_DISPLAY_NAME_LENGTH = 64;
+
+/** @type {TarnClient|null} */
+let _client = null;
+/** @type {Promise<TarnClient>|null} */
+let _initPromise = null;
+/** Cached after register/login. Used by the bookish-api subscription routes. */
+let _dataLookupKey = null;
+const DLK_STORAGE_KEY = 'bookish.tarn.dlk';
+
+const _remoteSignOutListeners = new Set();
+let _remoteSignOutNotifiedFor = null;
+
+function buildClient() {
+  return TarnClient.create({
+    apiBase: TARN_API,
+    appId: APP_ID,
+    schema: bookishSchema,
+    storage: watchSdkSignOut(TarnStorage.localStorage()),
+  });
+}
+
+// The SDK signs the device out by itself when a silent token refresh learns
+// the server session is gone (signed out from another device, password
+// recovered elsewhere, or 90 days idle): it drops its credentials, then
+// clears the stored blob through this adapter. logout() nulls _client before
+// it clears, so a clear that leaves the live client logged out is the SDK's.
+function watchSdkSignOut(storage) {
+  return {
+    read: () => storage.read(),
+    write: blob => storage.write(blob),
+    async clear() {
+      await storage.clear();
+      if (_client && !_client.isLoggedIn()) notifyRemoteSignOut(_client);
+    },
+  };
+}
+
+function notifyRemoteSignOut(client) {
+  if (_remoteSignOutNotifiedFor === client) return;
+  _remoteSignOutNotifiedFor = client;
+  for (const listener of _remoteSignOutListeners) {
+    Promise.resolve()
+      .then(listener)
+      .catch(err => console.warn('[TarnService] remote sign-out listener failed:', err?.message || err));
+  }
+}
+
+/**
+ * Subscribe to sign-outs the SDK performs on its own (see watchSdkSignOut).
+ * Not called for logout(). The SDK client is already logged out when the
+ * listener runs; the listener owns the app-side cleanup.
+ *
+ * @param {() => void | Promise<void>} listener
+ * @returns {() => void} unsubscribe
+ */
+export function onRemoteSignOut(listener) {
+  _remoteSignOutListeners.add(listener);
+  return () => _remoteSignOutListeners.delete(listener);
+}
+
+function clearLocalMetadata() {
+  localStorage.removeItem(STORAGE_KEYS.EMAIL);
+  localStorage.removeItem(STORAGE_KEYS.DISPLAY_NAME);
+  // A queued rename must die with the identity that queued it — flushing it
+  // into a later account on this device would cross-contaminate (cf. #231).
+  localStorage.removeItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+  localStorage.removeItem(DLK_STORAGE_KEY);
+}
+
+// ============ PUBLIC API ============
+
+/**
+ * Initialize the service — constructs the singleton client. The new SDK
+ * resumes any persisted session inside `TarnClient.create()`; if a blob
+ * is present and decryptable, the returned client is already logged in.
+ *
+ * Idempotent: subsequent calls return the existing client.
+ *
+ * @returns {Promise<boolean>} true if a session was restored (logged in)
+ */
+export async function init() {
+  if (_client) return _client.isLoggedIn();
+  if (!_initPromise) _initPromise = buildClient();
+  _client = await _initPromise;
+  _initPromise = null;
+  // Restore dlk cache from localStorage if a session was resumed (the SDK
+  // doesn't expose dlk directly, and resume bypasses register/login).
+  if (_client.isLoggedIn() && !_dataLookupKey) {
+    _dataLookupKey = localStorage.getItem(DLK_STORAGE_KEY) || null;
+  }
+  return _client.isLoggedIn();
+}
+
+async function ensureClient() {
+  if (_client) return _client;
+  await init();
+  return _client;
+}
+
+/**
+ * Register a new account.
+ *
+ * The Tarn SDK generates a 24-word BIP39 account key client-side and (in
+ * Model B, the default) ships an encrypted wrap of it to Tarn so the user
+ * can retrieve it later from Settings. The plaintext account key is
+ * returned in memory so the caller can surface it to the user once at
+ * signup.
+ *
+ * Tarn no longer renders a PDF kit or forwards anything by email — kit
+ * format and delivery are an app concern. Bookish currently shows the
+ * 24 words on screen with a copy button and stops there; a downloadable
+ * kit can be added later as a separate piece of work.
+ *
+ * The caller MUST surface the account key to the user (that's what
+ * `recoveryAcknowledged: true` is asserting). The SDK does not cache it;
+ * Bookish does not persist it either.
+ *
+ * @param {string} email
+ * @param {string} password
+ * @returns {Promise<{
+ *   dataLookupKey?: string,
+ *   accountKey: string,
+ * }>}
+ */
+export async function register(email, password) {
+  const client = await ensureClient();
+  const result = await client.register(email, password, {
+    storeAccountKey: true,
+    recoveryAcknowledged: true,
+  });
+  if (email) localStorage.setItem(STORAGE_KEYS.EMAIL, email);
+  if (result?.dataLookupKey) {
+    _dataLookupKey = result.dataLookupKey;
+    localStorage.setItem(DLK_STORAGE_KEY, result.dataLookupKey);
+  }
+  return result;
+}
+
+/**
+ * Log in to an existing account.
+ * @param {string} email
+ * @param {string} password
+ * @returns {Promise<{dataLookupKey?: string}>}
+ */
+export async function login(email, password) {
+  const client = await ensureClient();
+  const result = await client.login(email, password);
+  if (email) localStorage.setItem(STORAGE_KEYS.EMAIL, email);
+  if (result?.dataLookupKey) {
+    _dataLookupKey = result.dataLookupKey;
+    localStorage.setItem(DLK_STORAGE_KEY, result.dataLookupKey);
+  }
+  return result;
+}
+
+/**
+ * Forgot-password recovery: prove account ownership with the 24-word
+ * account key and set a new password. The SDK re-wraps the existing data
+ * keys under the new credentials (all pre-recovery books stay decryptable)
+ * and re-authenticates internally — when this resolves, the user is
+ * SIGNED IN under the new password. Server-side, every OTHER active
+ * session is revoked by the recovery; registered passkeys survive
+ * unchanged (recovery does not mint a new key generation).
+ *
+ * `email` becomes the account's sign-in username going forward — the
+ * account is located by the key alone, so the email here is a SET, not a
+ * check. The form copy makes this explicit.
+ *
+ * Side effects mirror login(): cache email + dataLookupKey for the
+ * subscription routes and the Account modal.
+ *
+ * Throwing contract: rejects on a malformed key ("expected 24 words…",
+ * "invalid BIP39 mnemonic…"), an unknown key ("no account found for this
+ * account key + app"), or network/server failures. Callers surface these
+ * via humanizeRecoveryError in components/account_auth_flows.js.
+ *
+ * @param {string} email - new sign-in email (username)
+ * @param {string} accountKey - the 24-word account key
+ * @param {string} newPassword
+ * @returns {Promise<{dataLookupKey?: string}>}
+ */
+export async function recoverAccount(email, accountKey, newPassword) {
+  const client = await ensureClient();
+  const result = await client.recoverAccount({
+    phrase: accountKey,
+    newUsername: email,
+    newPassword,
+  });
+  if (email) localStorage.setItem(STORAGE_KEYS.EMAIL, email);
+  if (result?.dataLookupKey) {
+    _dataLookupKey = result.dataLookupKey;
+    localStorage.setItem(DLK_STORAGE_KEY, result.dataLookupKey);
+  }
+  return result;
+}
+
+/**
+ * Authenticate using a registered passkey (recovery v2 — phase 4). Peer
+ * of `login()`: no prior session required, succeeds the same way (JWT +
+ * DEK chain installed, persisted session blob written by the SDK), and
+ * the resulting client behaves identically to a password-authenticated
+ * one. Subsequent collection / settings / sharing calls all work.
+ *
+ * Side-effects mirror `login()`:
+ *   - On success, cache the SDK's `dataLookupKey` in memory and persist
+ *     it to localStorage so subscription / per-user routes can keep
+ *     working. The SDK does NOT expose the email on the result of a
+ *     passkey auth (passkey-only sessions are username-less by design),
+ *     so the email cache is left alone here — callers that have an
+ *     email in hand (e.g. the stale-repair handler) can persist it
+ *     themselves via the EMAIL storage key if they choose to.
+ *
+ * `stalePasskeyHandler` is invoked by the SDK ONLY when the server
+ * flags the just-used credential as stale (no `passkey_prf` wrapping
+ * on the latest gen — typically because a `changeCredentials` ran on
+ * another device without re-tapping this passkey). When invoked, the
+ * handler MUST return `{ username, password } | null`:
+ *   - `{ username, password }` lets the SDK derive the password KEK,
+ *     unwrap the latest gen, re-wrap it under this passkey's PRF key,
+ *     and submit the repaired envelope. Auth then continues as if the
+ *     credential had never been stale.
+ *   - `null` aborts the repair; the SDK throws `StalePasskeyError`
+ *     (detectable via `err.name === 'StalePasskeyError'`).
+ * The wrapper itself does not invoke the handler — it's purely a
+ * passthrough.
+ *
+ * Throwing contract: this wraps the SDK's `authenticateWithPasskey`, which
+ * can REJECT — e.g. `StalePasskeyError` (the stale-repair handler returned
+ * `null`), `NotAllowedError`/user-cancelled WebAuthn, no-credential-found,
+ * `TarnPasskeyOnlyError`, or a network failure. The wrapper does NOT swallow
+ * these; callers MUST `await` it inside a try/catch (or attach `.catch`) and
+ * surface the failure to the user. The sign-in handler in
+ * `components/account_auth_flows.js` does this via `humanizePasskeySigninError`.
+ *
+ * @param {{
+ *   stalePasskeyHandler?: () => Promise<{ username: string, password: string } | null>,
+ *   credentialId?: string,
+ *   deviceLabel?: string,
+ * }} [opts]
+ * @returns {Promise<{dataLookupKey?: string}>}
+ */
+export async function authenticateWithPasskey(opts = {}) {
+  const client = await ensureClient();
+  const result = await client.authenticateWithPasskey(opts);
+  if (result?.dataLookupKey) {
+    _dataLookupKey = result.dataLookupKey;
+    localStorage.setItem(DLK_STORAGE_KEY, result.dataLookupKey);
+  }
+  // Passkey sessions are username-less by design — the SDK has no email or
+  // display name for this account. Clear any stale values left over from a
+  // previous password sign-in to a *different* account on this browser, so
+  // the Account modal cannot misrepresent the session identity (see #224).
+  // The pending-rename marker goes with them (#235): it belongs to the
+  // previous identity and must not flush into this one.
+  localStorage.removeItem(STORAGE_KEYS.EMAIL);
+  localStorage.removeItem(STORAGE_KEYS.DISPLAY_NAME);
+  localStorage.removeItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+  return result;
+}
+
+/**
+ * Log out — clears the local session via the SDK (which forgets the
+ * persisted blob and invalidates the IndexedDB wrapping key) and clears
+ * Bookish's UI-side metadata.
+ *
+ * @returns {Promise<void>}
+ */
+export async function logout() {
+  // Drop singletons FIRST so any callback the SDK fires during clear()
+  // can't write back through this module. This re-orders the prior version
+  // where the singleton was nulled after the await — the prior order let
+  // a re-entry between clearLocalMetadata() and `await client.session.clear()`
+  // re-populate the bookish.* metadata in rare cases (see bug from
+  // 2026-05-11 UAT walk).
+  const client = _client;
+  _client = null;
+  _initPromise = null;
+  _dataLookupKey = null;
+
+  if (client) {
+    try { await client.session.clear(); } catch (err) {
+      console.warn('[TarnService] session.clear failed:', err.message);
+    }
+  }
+
+  // Belt-and-suspenders: explicitly clear the Tarn SDK's session blob in
+  // localStorage. `session.clear()` is supposed to handle this, but it
+  // failed to in the UAT walk; we observed `tarn:session:v1` surviving the
+  // logout. If the SDK reliably clears its key in the future, this becomes
+  // a no-op. If the SDK ever changes its key, this stale literal becomes
+  // dead-code (harmless) — worth re-validating periodically.
+  try { localStorage.removeItem('tarn:session:v1'); } catch {}
+
+  // Clear bookish-side metadata LAST so any race with session.clear() that
+  // might have re-set keys (observed once during UAT) is overridden by the
+  // final clean state.
+  clearLocalMetadata();
+}
+
+/**
+ * Permanently delete the signed-in account. Tarn removes the account
+ * record (sign-in credentials and stored key wraps) and every session, and
+ * marks the credential deleted on Arweave; the SDK then wipes this
+ * device's session and per-account stores. Encrypted entries already on
+ * Arweave are permanent and stay unreadable without the account's keys.
+ *
+ * Detaches the client first, like logout(), so nothing the SDK fires while
+ * clearing can be read as this module's live session. If the server
+ * refuses, the still-signed-in client is put back and the error rethrown.
+ *
+ * @returns {Promise<void>}
+ */
+export async function deleteAccount() {
+  const client = _client;
+  if (!client || !client.isLoggedIn()) throw new Error('Not logged in');
+  _client = null;
+  try {
+    await client.account.delete();
+  } catch (err) {
+    if (client.isLoggedIn()) _client = client;
+    throw err;
+  }
+  _initPromise = null;
+  _dataLookupKey = null;
+  try { localStorage.removeItem('tarn:session:v1'); } catch {}
+  clearLocalMetadata();
+}
+
+/**
+ * Check if user is logged in.
+ * @returns {boolean}
+ */
+export function isLoggedIn() {
+  return !!_client && _client.isLoggedIn();
+}
+
+/**
+ * Get the TarnClient instance. JWT expiry is handled inside the SDK
+ * (challenge-response refresh on first authenticated call).
+ * @returns {Promise<TarnClient>}
+ * @throws if not logged in
+ */
+export async function getClient() {
+  if (!_client) throw new Error('Not logged in');
+  if (!_client.isLoggedIn()) throw new Error('Not logged in');
+  return _client;
+}
+
+/**
+ * Get the cached `dataLookupKey` from the most recent register/login (or
+ * the persisted-on-resume copy from localStorage). Used by the bookish-api
+ * subscription routes which key per-user state on the dlk.
+ *
+ * Returns null if not logged in or never captured.
+ * @returns {string|null}
+ */
+export function getDataLookupKey() {
+  if (_dataLookupKey) return _dataLookupKey;
+  if (isLoggedIn()) return localStorage.getItem(DLK_STORAGE_KEY);
+  return null;
+}
+
+/**
+ * Get the stored email for display purposes.
+ * @returns {string|null}
+ */
+export function getEmail() {
+  return localStorage.getItem(STORAGE_KEYS.EMAIL);
+}
+
+/**
+ * Normalize a human display name for storage and display.
+ *
+ * @param {string} [name]
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+export function normalizeDisplayName(name, fallback = 'User') {
+  const normalized = String(name || '').trim().replace(/\s+/g, ' ');
+  const clipped = normalized.length > MAX_DISPLAY_NAME_LENGTH
+    ? normalized.slice(0, MAX_DISPLAY_NAME_LENGTH).trim()
+    : normalized;
+  return clipped || fallback || 'User';
+}
+
+/**
+ * Fallback display name from email. This is still used for blank signup
+ * names and legacy accounts that do not have a synced profile yet.
+ *
+ * @param {string|null} [email]
+ * @returns {string}
+ */
+export function defaultDisplayName(email = getEmail()) {
+  return (String(email || '').split('@')[0] || 'User').trim() || 'User';
+}
+
+function cacheDisplayName(name) {
+  const normalized = normalizeDisplayName(name);
+  localStorage.setItem(STORAGE_KEYS.DISPLAY_NAME, normalized);
+  return normalized;
+}
+
+function getProfilesCollection(client) {
+  const profiles = client?.profiles || client?.collections?.profiles;
+  if (!profiles || typeof profiles.get !== 'function') {
+    throw new Error('Tarn profiles collection is unavailable');
+  }
+  return profiles;
+}
+
+/**
+ * Get/set the cached display name. Prefer hydrateDisplayName() /
+ * saveDisplayName() for logged-in flows that need cross-device sync.
+ *
+ * @param {string} [name] — if provided, sets the display name
+ * @returns {string|null}
+ */
+export function displayName(name) {
+  if (name !== undefined) {
+    return cacheDisplayName(name);
+  }
+  return localStorage.getItem(STORAGE_KEYS.DISPLAY_NAME);
+}
+
+/**
+ * Load the synced Bookish profile and refresh the local display-name cache.
+ * If no synced profile exists yet, this returns/cache-falls back to the
+ * email-derived name without writing a profile.
+ *
+ * @param {{ fallback?: string, email?: string }} [opts]
+ * @returns {Promise<string>}
+ */
+export async function hydrateDisplayName(opts = {}) {
+  const fallback = normalizeDisplayName(opts.fallback || defaultDisplayName(opts.email));
+
+  // A queued local rename outranks the synced profile — it IS the newer
+  // intent. Try to land it, and never let a stale pull overwrite it (#235;
+  // same local-intent-survives-pull rule as the book sync paths).
+  if (localStorage.getItem(STORAGE_KEYS.PENDING_DISPLAY_NAME)) {
+    try {
+      await flushPendingDisplayName();
+    } catch (err) {
+      console.warn('[TarnService] pending display name flush failed:', err?.message || err);
+    }
+    if (localStorage.getItem(STORAGE_KEYS.PENDING_DISPLAY_NAME)) {
+      const pending = displayName();
+      if (pending) return normalizeDisplayName(pending, fallback);
+      return cacheDisplayName(fallback);
+    }
+  }
+
+  try {
+    const client = await getClient();
+    const profiles = getProfilesCollection(client);
+    const profile = await profiles.get(PROFILE_ID);
+    if (profile?.displayName) {
+      return cacheDisplayName(normalizeDisplayName(profile.displayName, fallback));
+    }
+  } catch (err) {
+    console.warn('[TarnService] profile hydrate failed:', err?.message || err);
+  }
+
+  const cached = displayName();
+  if (cached) return normalizeDisplayName(cached, fallback);
+  return cacheDisplayName(fallback);
+}
+
+/**
+ * Persist the display name. Local-first (#235): the rename takes effect on
+ * this device immediately (cache + pending marker), and the synced profile
+ * write happens in a background flush that survives failure — boot retries
+ * it via flushPendingDisplayName(), mirroring retryPendingProvisioning.
+ * Resolves with the normalized name without waiting on the network.
+ *
+ * @param {string} name
+ * @param {{ fallback?: string, email?: string }} [opts]
+ * @returns {Promise<string>}
+ */
+export async function saveDisplayName(name, opts = {}) {
+  const fallback = normalizeDisplayName(opts.fallback || defaultDisplayName(opts.email));
+  const nextName = normalizeDisplayName(name, fallback);
+  cacheDisplayName(nextName);
+  localStorage.setItem(
+    STORAGE_KEYS.PENDING_DISPLAY_NAME,
+    JSON.stringify({ name: nextName, updatedAt: Date.now(), dlk: getDataLookupKey() || null })
+  );
+  flushPendingDisplayName().catch(err =>
+    console.warn('[TarnService] display name sync deferred:', err?.message || err)
+  );
+  return nextName;
+}
+
+// Serializes profile writes so two rapid renames can't interleave their
+// get->update round-trips and land out of order.
+let displayNameFlushChain = Promise.resolve();
+
+/**
+ * Push the pending display-name rename (if any) to the synced profile
+ * record. Clears the pending marker only when the write lands AND no newer
+ * rename was queued mid-flight. Errors propagate (the marker survives for
+ * the next boot/hydrate retry).
+ *
+ * @returns {Promise<string|null>} the flushed name, or null if nothing pending
+ */
+export function flushPendingDisplayName() {
+  const run = displayNameFlushChain.catch(() => {}).then(async () => {
+    const raw = localStorage.getItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+    if (!raw) return null;
+
+    let pending = null;
+    try { pending = JSON.parse(raw); } catch {}
+    if (!pending?.name) {
+      localStorage.removeItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+      return null;
+    }
+    // The marker belongs to the identity that queued it. If the active
+    // account changed underneath it, discard rather than cross-contaminate
+    // another account's profile (cf. #231 account-scoping incident).
+    if (pending.dlk && pending.dlk !== getDataLookupKey()) {
+      localStorage.removeItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+      return null;
+    }
+
+    const client = await getClient();
+    const profiles = getProfilesCollection(client);
+    const existing = await profiles.get(PROFILE_ID);
+    if (existing) {
+      await profiles.update(PROFILE_ID, { displayName: pending.name, updatedAt: pending.updatedAt });
+    } else {
+      await profiles.create({ profileId: PROFILE_ID, displayName: pending.name, updatedAt: pending.updatedAt });
+    }
+
+    if (localStorage.getItem(STORAGE_KEYS.PENDING_DISPLAY_NAME) === raw) {
+      localStorage.removeItem(STORAGE_KEYS.PENDING_DISPLAY_NAME);
+    }
+    return pending.name;
+  });
+  displayNameFlushChain = run;
+  return run;
+}
+
+// ============ UI PREFERENCES ============
+
+export function getActiveFields() {
+  try {
+    const data = localStorage.getItem(STORAGE_KEYS.ACTIVE_FIELDS);
+    return data ? JSON.parse(data) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setActiveFields(fields) {
+  localStorage.setItem(STORAGE_KEYS.ACTIVE_FIELDS, JSON.stringify(fields));
+}
+
+// ============ ACCOUNT KEY (recovery v2) ============
+//
+// Thin passthroughs to `client.accountKey.*`. The SDK handles the step-up
+// auth dance internally for view / rotate / enable / disable — Bookish just
+// passes the freshly re-entered password. The plaintext account key is
+// returned in memory and must be surfaced once and dropped — never persisted.
+//
+// `isStored()` is sync but may return null on a fresh client that hasn't
+// completed an auth round-trip yet. Callers (e.g. the custody toggle in
+// account_ui) handle that null by rendering a "Loading…" state and
+// retrying.
+
+/**
+ * View the user's stored 24-word account key (Model B only). Triggers a
+ * step-up auth dance under the covers; on success returns the phrase in
+ * memory. Drop it from any closure as soon as the user has copied it.
+ *
+ * Throws an Error with `no_account_key_stored` in the message for Model A
+ * accounts; throws `AccountKeyPinningError` on a wrap-pinning mismatch
+ * (security warning — surface distinctly, do NOT show the would-be phrase).
+ *
+ * @param {{ password: string }} opts
+ * @returns {Promise<{ accountKey: string }>}
+ */
+async function viewAccountKey(opts) {
+  const client = await getClient();
+  return client.accountKey.view(opts);
+}
+
+/**
+ * Rotate the account key. Generates a new 24-word phrase, re-wraps the
+ * DEK chain under it, and atomically publishes the bundle. The OLD
+ * account key stops working for `recoverAccount` immediately on success.
+ *
+ * Password and username are unchanged. Pre-rotation data remains
+ * decryptable. If the account is in Model B, the new key is also stored
+ * (re-wrapped under DEK_gen1).
+ *
+ * @param {{ password: string }} opts
+ * @returns {Promise<{ accountKey: string }>}
+ */
+async function rotateAccountKey(opts) {
+  const client = await getClient();
+  return client.accountKey.rotate(opts);
+}
+
+/**
+ * Disable Model B storage (B → A). Server-side wrap is removed; subsequent
+ * `viewAccountKey()` calls fail with `no_account_key_stored`. Idempotent —
+ * safe to call on an already-Model-A account.
+ *
+ * @param {{ password: string }} opts
+ * @returns {Promise<void>}
+ */
+async function disableKeyStorage(opts) {
+  const client = await getClient();
+  await client.accountKey.disableKeyStorage(opts);
+}
+
+/**
+ * Enable Model B storage (A → B). Caller passes the password AND the user's
+ * existing 24-word account key. The SDK runs a wrap-pinning check before
+ * any server round trip — a phrase that doesn't belong to this account
+ * throws `AccountKeyPinningError` synchronously.
+ *
+ * @param {{ password: string, accountKey: string }} opts
+ * @returns {Promise<void>}
+ */
+async function enableKeyStorage(opts) {
+  const client = await getClient();
+  await client.accountKey.enableKeyStorage(opts);
+}
+
+/**
+ * Whether Tarn currently stores a wrap of this account's account key.
+ *
+ * - `true`  — Model B. `viewAccountKey()` is available.
+ * - `false` — Model A (no backup stored). `viewAccountKey()` will fail
+ *             with `no_account_key_stored`.
+ * - `null`  — unknown (fresh client; no `/auth/verify` round-trip yet).
+ *             Callers render a "Loading…" UI and retry shortly after.
+ *
+ * @returns {boolean | null}
+ */
+function isAccountKeyStored() {
+  if (!_client) return null;
+  return _client.accountKey.isStored();
+}
+
+/**
+ * Namespaced accessor for the new account-key surface — mirrors the SDK
+ * grouping (`tarn.accountKey.*`). The flat names above are kept for
+ * symmetry with the existing flat exports (`register`, `login`, etc.) but
+ * UI code should prefer this namespace because it reads cleaner at the
+ * callsite.
+ */
+export const accountKey = {
+  view: viewAccountKey,
+  rotate: rotateAccountKey,
+  disableKeyStorage,
+  enableKeyStorage,
+  isStored: isAccountKeyStored,
+};
+
+// ============ PASSKEYS (recovery v2 — phase 3, sign-in in phase 4) ============
+//
+// Thin passthroughs to `client.passkeys.*`. The SDK handles WebAuthn-PRF
+// registration / list / remove / supported-detection internally. Bookish
+// just surfaces these in the Account & Security settings section.
+//
+// Sign-in via passkey (`authenticateWithPasskey`) is exposed as a top-level
+// wrapper below — it's a peer of `login()` (no prior session), not a
+// passkeys-namespace method. The password-change re-tap callback
+// (`passkeyTapHandler`) remains unwrapped: it belongs to a future
+// change-password affordance Bookish doesn't have yet.
+
+/**
+ * Whether this browser/device can register and use passkeys (WebAuthn +
+ * PRF extension + platform authenticator). Apps must feature-detect
+ * before surfacing the affordance.
+ *
+ * @returns {Promise<boolean>}
+ */
+async function passkeysIsSupported() {
+  const client = await ensureClient();
+  return client.passkeys.isSupported();
+}
+
+/**
+ * Register a new passkey for the logged-in account. Triggers the
+ * platform-authenticator prompt (Touch ID / Face ID / Windows Hello /
+ * security key). The DEK chain gains a `passkey_prf` wrapping per gen so
+ * the resulting credential can independently unwrap data.
+ *
+ * @param {{ deviceLabel?: string }} [opts]
+ * @returns {Promise<{ credentialId: string, deviceLabel: string | null }>}
+ */
+async function passkeysRegister(opts = {}) {
+  const client = await getClient();
+  return client.passkeys.register(opts);
+}
+
+/**
+ * List the passkeys registered for this account. Each entry is one
+ * device the user has enrolled. `lastUsedAt` is null for credentials
+ * that have never authenticated.
+ *
+ * Each entry also carries a `stale` flag, but Bookish does NOT surface
+ * it in the UI — just-in-time repair handles staleness transparently at
+ * sign-in time. The flag is left on the returned objects untouched in
+ * case future phases need it.
+ *
+ * @returns {Promise<Array<{ credentialId: string, deviceLabel: string | null, createdAt: number, lastUsedAt: number | null, stale: boolean }>>}
+ */
+async function passkeysList() {
+  const client = await getClient();
+  return client.passkeys.list();
+}
+
+/**
+ * Remove a registered passkey. Step-up gated — caller passes the
+ * freshly-typed password so the server can confirm possession.
+ *
+ * @param {{ credentialId: string, password: string }} opts
+ * @returns {Promise<void>}
+ */
+async function passkeysRemove(opts) {
+  const client = await getClient();
+  return client.passkeys.remove(opts);
+}
+
+/**
+ * Namespaced accessor for the passkey surface — mirrors the SDK grouping
+ * (`tarn.passkeys.*`). Same shape and motivation as `accountKey` above.
+ */
+export const passkeys = {
+  isSupported: passkeysIsSupported,
+  register: passkeysRegister,
+  list: passkeysList,
+  remove: passkeysRemove,
+};
+
+// ============ UNIFIED CREDENTIALS CHANGE ============
+//
+// `tarn.account.changeCredentials(newUsername, newPassword, opts)` takes both
+// username and password as inputs in a single SDK call and re-wraps the DEK
+// chain (the cryptographic reality: master_key = KDF(username, password) —
+// changing either input rotates everything). This wrapper hides the
+// orchestration:
+//   1. Verify the current password app-side and fetch the 24-word account-key
+//      phrase via `client.accountKey.view({ password })`. The SDK has no
+//      `oldPassword` parameter — trust comes from the session AND the phrase
+//      requirement (the new gen needs a recovery wrapping).
+//   2. Compute effective new credentials. Omitted fields fall back to current
+//      values so the caller can change just one half.
+//   3. Call `client.account.changeCredentials(newUsername, newPassword, opts)`
+//      with the retrieved phrase + an optional `passkeyTapHandler`.
+//   4. On success, refresh the cached email if username changed.
+//
+// `acceptRecoveryGap: true` is deliberately NEVER set — silently breaking
+// recovery for new data is contra Bookish's product stance.
+
+/**
+ * Change the user's username (email) and/or password atomically. Either
+ * field can be omitted to keep the current value (the SDK still does a full
+ * re-wrap; cryptographically there's no "change just one half").
+ *
+ * Verifies the current password app-side via `accountKey.view` (this is the
+ * step-up that BOTH proves the password AND retrieves the phrase the SDK
+ * needs for the new generation's recovery wrapping). If the account is in
+ * Model A (`no_account_key_stored`), the view fails — caller should surface
+ * the model-A error from `humanizeCredentialChangeError`.
+ *
+ * If the account has registered passkeys, the SDK invokes
+ * `passkeyTapHandler` per credential during the change. The handler must
+ * return true (proceed → SDK invokes WebAuthn) or false / throw (skip → that
+ * credential becomes stale on the new gen and will trigger the stale-repair
+ * flow on next passkey sign-in). The wrapper does NOT pass
+ * `acceptRecoveryGap: true`.
+ *
+ * @param {{
+ *   currentPassword: string,
+ *   newUsername?: string,
+ *   newPassword?: string,
+ *   passkeyTapHandler?: (cred: { credentialId: string, deviceLabel: string | null }) => Promise<boolean>,
+ * }} opts
+ * @returns {Promise<unknown>} The SDK return value (opaque; success-only).
+ */
+export async function changeCredentials({
+  currentPassword,
+  newUsername,
+  newPassword,
+  passkeyTapHandler,
+} = {}) {
+  if (!currentPassword) {
+    throw new Error('changeCredentials: currentPassword is required');
+  }
+  const client = await getClient();
+
+  // Step-up + phrase fetch. Throws on wrong password / Model A / network.
+  const { accountKey: phrase } = await client.accountKey.view({ password: currentPassword });
+
+  const currentEmail = localStorage.getItem(STORAGE_KEYS.EMAIL) || '';
+  const passkeyOnly = !currentEmail;
+
+  // Passkey-only sessions (#224) don't cache an email. The caller MUST
+  // supply a new username explicitly; we have no cached value to fall back
+  // to. Without this guard the user gets a cryptic "no current username
+  // available" error from the generic check below. Convert to a clear,
+  // actionable message that names the actual problem.
+  if (passkeyOnly && (typeof newUsername !== 'string' || newUsername.length === 0)) {
+    throw new Error(
+      'changeCredentials: passkey-authenticated session — a new username must be ' +
+      'provided explicitly (no cached username to fall back to).'
+    );
+  }
+
+  const effectiveUsername =
+    typeof newUsername === 'string' && newUsername.length > 0 ? newUsername : currentEmail;
+  const effectivePassword =
+    typeof newPassword === 'string' && newPassword.length > 0 ? newPassword : currentPassword;
+
+  if (!effectiveUsername) {
+    throw new Error('changeCredentials: no current username available — cannot compute effective new username');
+  }
+
+  const sdkOpts = { phrase };
+  if (typeof passkeyTapHandler === 'function') {
+    sdkOpts.passkeyTapHandler = passkeyTapHandler;
+  }
+
+  const result = await client.account.changeCredentials(
+    effectiveUsername,
+    effectivePassword,
+    sdkOpts,
+  );
+
+  // Refresh the cached email if username changed. The SDK's session-resume
+  // path doesn't write back to localStorage; we own this cache.
+  // Defense in depth: only write a non-empty value — never poison the cache
+  // with an empty string even if the guards above were ever bypassed.
+  if (effectiveUsername !== currentEmail && effectiveUsername.length > 0) {
+    localStorage.setItem(STORAGE_KEYS.EMAIL, effectiveUsername);
+  }
+
+  return result;
+}
+
+/** Storage keys used by this service (for external cleanup). */
+export { STORAGE_KEYS };

@@ -3,353 +3,14 @@
 <head>
   <meta charset="utf-8"/>
   <title>About Bookish — A Private, Permanent Reading List</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <meta name="description" content="Bookish is a reading list app that saves your books permanently and privately. Pay once, keep it forever."/>
-  <meta name="theme-color" content="#2563eb"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
+  <meta name="description" content="Bookish is a free reading list app that saves your books permanently and privately. No ads, no data harvesting — your library is yours."/>
+  <meta name="theme-color" content="#0f1114"/>
+  <meta name="view-transition" content="same-origin"/>
   <link rel="icon" type="image/png" sizes="32x32" href="assets/icons/icon-192.png"/>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&display=swap" rel="stylesheet">
-  <style>
-    /* Reset & base */
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    :root {
-      --font-display: 'Fraunces', Georgia, serif;
-      --font-body: 'DM Sans', system-ui, sans-serif;
-      --color-bg-deep: #0f1114;
-      --color-bg-base: #151920;
-      --color-bg-surface: #1c222a;
-      --color-bg-elevated: #242b35;
-      --color-text-primary: #f7f5f2;
-      --color-text-secondary: #c9c5be;
-      --color-text-muted: #7a7670;
-      --color-border-subtle: #2a2f38;
-      --color-border-default: #363d48;
-      --color-primary: #3b82f6;
-      --color-primary-hover: #60a5fa;
-      --color-primary-muted: rgba(59, 130, 246, 0.15);
-      --color-accent: #f59e0b;
-      --color-success: #10b981;
-    }
-
-    body {
-      font-family: var(--font-body);
-      background: linear-gradient(180deg, var(--color-bg-deep) 0%, var(--color-bg-base) 100%);
-      color: var(--color-text-primary);
-      min-height: 100vh;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
-      opacity: 0.025;
-      pointer-events: none;
-      z-index: -1;
-    }
-
-    /* Layout */
-    .page {
-      max-width: 720px;
-      margin: 0 auto;
-      padding: 48px 24px 64px;
-    }
-
-    /* === Shared nav === */
-    .nav {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 64px;
-    }
-
-    .nav-brand {
-      font-family: var(--font-display);
-      font-size: 1.25rem;
-      font-weight: 600;
-      color: var(--color-text-primary);
-      text-decoration: none;
-      letter-spacing: -0.02em;
-      background: linear-gradient(135deg, var(--color-text-primary) 0%, var(--color-accent) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    .nav-links {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.875rem;
-    }
-
-    .nav-links .sep {
-      color: var(--color-text-muted);
-      opacity: 0.4;
-      user-select: none;
-    }
-
-    .nav-links a {
-      color: var(--color-text-muted);
-      text-decoration: none;
-      font-weight: 500;
-      transition: color 0.2s ease;
-    }
-
-    .nav-links a:hover {
-      color: var(--color-text-primary);
-    }
-
-    .nav-links a.active {
-      color: var(--color-text-primary);
-    }
-
-    /* Hero */
-    .hero {
-      text-align: center;
-      margin-bottom: 80px;
-    }
-
-    .hero-icon {
-      font-size: 3.5rem;
-      margin-bottom: 24px;
-      display: block;
-    }
-
-    .hero h1 {
-      font-family: var(--font-display);
-      font-size: 2.5rem;
-      font-weight: 500;
-      line-height: 1.2;
-      letter-spacing: -0.02em;
-      margin-bottom: 16px;
-      color: var(--color-text-primary);
-    }
-
-    .hero p {
-      font-size: 1.125rem;
-      color: var(--color-text-secondary);
-      max-width: 480px;
-      margin: 0 auto 36px;
-    }
-
-    .hero-cta {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-family: var(--font-body);
-      font-size: 1.05rem;
-      font-weight: 600;
-      padding: 16px 36px;
-      border-radius: 10px;
-      border: none;
-      background: linear-gradient(135deg, var(--color-primary) 0%, #2563eb 100%);
-      color: #fff;
-      text-decoration: none;
-      box-shadow: 0 4px 16px -4px rgba(59, 130, 246, 0.5);
-      transition: all 0.2s ease;
-      cursor: pointer;
-    }
-
-    .hero-cta:hover {
-      background: linear-gradient(135deg, var(--color-primary-hover) 0%, #3b82f6 100%);
-      box-shadow: 0 6px 20px -4px rgba(59, 130, 246, 0.6);
-      transform: translateY(-2px);
-    }
-
-    /* Value propositions */
-    .values {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 24px;
-      margin-bottom: 80px;
-    }
-
-    .value-card {
-      background: var(--color-bg-surface);
-      border: 1px solid var(--color-border-subtle);
-      border-radius: 14px;
-      padding: 28px 24px;
-      transition: border-color 0.2s ease;
-    }
-
-    .value-card:hover {
-      border-color: var(--color-border-default);
-    }
-
-    .value-icon {
-      font-size: 1.75rem;
-      margin-bottom: 12px;
-      display: block;
-    }
-
-    .value-card h3 {
-      font-family: var(--font-display);
-      font-size: 1.2rem;
-      font-weight: 500;
-      margin-bottom: 8px;
-      color: var(--color-text-primary);
-    }
-
-    .value-card p {
-      font-size: 0.95rem;
-      color: var(--color-text-secondary);
-      line-height: 1.5;
-    }
-
-    /* How it works */
-    .how-it-works {
-      margin-bottom: 80px;
-    }
-
-    .section-title {
-      font-family: var(--font-display);
-      font-size: 1.75rem;
-      font-weight: 500;
-      text-align: center;
-      margin-bottom: 40px;
-      letter-spacing: -0.01em;
-    }
-
-    .steps {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 24px;
-      counter-reset: step;
-    }
-
-    .step {
-      display: flex;
-      gap: 20px;
-      align-items: flex-start;
-    }
-
-    .step-number {
-      flex-shrink: 0;
-      width: 44px;
-      height: 44px;
-      border-radius: 50%;
-      background: var(--color-primary-muted);
-      color: var(--color-primary);
-      font-family: var(--font-display);
-      font-size: 1.1rem;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid rgba(59, 130, 246, 0.2);
-    }
-
-    .step-content h3 {
-      font-family: var(--font-display);
-      font-size: 1.1rem;
-      font-weight: 500;
-      margin-bottom: 4px;
-      color: var(--color-text-primary);
-    }
-
-    .step-content p {
-      font-size: 0.95rem;
-      color: var(--color-text-secondary);
-    }
-
-    /* Alpha badge */
-    .alpha-note {
-      text-align: center;
-      margin-bottom: 48px;
-      padding: 20px;
-      background: var(--color-bg-surface);
-      border: 1px solid var(--color-border-subtle);
-      border-radius: 12px;
-    }
-
-    .alpha-note p {
-      font-size: 0.9rem;
-      color: var(--color-text-secondary);
-      line-height: 1.5;
-    }
-
-    .alpha-note strong {
-      color: var(--color-accent);
-    }
-
-    /* Footer */
-    .about-footer {
-      text-align: center;
-      padding-top: 40px;
-      border-top: 1px solid var(--color-border-subtle);
-    }
-
-    .about-footer p {
-      font-size: 0.8rem;
-      color: var(--color-text-muted);
-    }
-
-    .about-footer a {
-      color: var(--color-text-secondary);
-      text-decoration: none;
-      transition: color 0.2s ease;
-    }
-
-    .about-footer a:hover {
-      color: var(--color-primary);
-    }
-
-    /* Responsive */
-    @media (min-width: 600px) {
-      .page {
-        padding: 64px 32px 80px;
-      }
-
-      .hero h1 {
-        font-size: 3rem;
-      }
-
-      .values {
-        grid-template-columns: repeat(3, 1fr);
-      }
-
-      .steps {
-        gap: 32px;
-      }
-    }
-
-    @media (max-width: 599px) {
-      .hero h1 {
-        font-size: 2rem;
-      }
-
-      .hero p {
-        font-size: 1rem;
-      }
-
-      .hero-cta {
-        width: 100%;
-        justify-content: center;
-        padding: 16px 24px;
-      }
-
-      .nav {
-        margin-bottom: 48px;
-      }
-
-      .section-title {
-        font-size: 1.5rem;
-      }
-    }
-
-    /* Reduced motion */
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        transition-duration: 0.01ms !important;
-      }
-    }
-  </style>
+  <link rel="preload" href="fonts/dm-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/fraunces-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="css/static-pages.css"/>
 </head>
 <body>
 
@@ -369,28 +30,28 @@
 
   <!-- Hero -->
   <section class="hero">
-    <span class="hero-icon" aria-hidden="true">📚</span>
+    <span class="hero-shelf-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
     <h1>A private, permanent reading list</h1>
-    <p>Track what you read. Keep it forever. Your data is encrypted and yours alone — no subscriptions, no ads, no snooping.</p>
+    <p>Track what you read. Keep it forever. Your data is encrypted and yours alone — and Bookish is free to use.</p>
     <a href="/" class="hero-cta">Try Bookish</a>
   </section>
 
   <!-- Value Props -->
   <section class="values">
     <div class="value-card">
-      <span class="value-icon" aria-hidden="true">🔒</span>
+      <span class="value-mark" aria-hidden="true"><span></span><span></span><span></span></span>
       <h3>Private</h3>
       <p>Your reading list is encrypted before it leaves your device. You control who has access — and unless you share it, that's no one but you.</p>
     </div>
     <div class="value-card">
-      <span class="value-icon" aria-hidden="true">♾️</span>
+      <span class="value-mark" aria-hidden="true"><span></span><span></span><span></span></span>
       <h3>Permanent</h3>
       <p>Stored forever on a permanent network — not on servers that can shut down, get acquired, or lose your data.</p>
     </div>
     <div class="value-card">
-      <span class="value-icon" aria-hidden="true">💰</span>
-      <h3>No subscription</h3>
-      <p>Pay once, keep it forever. No monthly fees. No surprise price increases. Your reading list is yours for life.</p>
+      <span class="value-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+      <h3>Free to use</h3>
+      <p>Save as many books as you like, free. No ads, no surprise tiers, no selling your reading data. Optional paid plans may arrive later to support permanent storage.</p>
     </div>
   </section>
 

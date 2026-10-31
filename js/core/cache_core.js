@@ -1,13 +1,15 @@
 // cache_core.js - Pure cache logic extracted from cache.js
 // Testable functions for content hashing, duplicate detection, and remote merge
 
+import { debugLog } from './debug_log.js';
+
 /**
  * Compute SHA-256 based content hash for an entry
- * @param {Object} entry - Entry object with title, author, edition, format, dateRead
+ * @param {Object} entry - Entry object with title, author, format, dateRead
  * @returns {Promise<string>} - Hash in format "sha256-<hex>"
  */
 export async function computeContentHash(entry) {
-  const base = (entry.title || '') + '|' + (entry.author || '') + '|' + (entry.edition || '') + '|' + (entry.format || '') + '|' + (entry.dateRead || '');
+  const base = (entry.title || '') + '|' + (entry.author || '') + '|' + (entry.format || '') + '|' + (entry.dateRead || '');
   const enc = new TextEncoder().encode(base);
   const buf = await crypto.subtle.digest('SHA-256', enc);
   const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -31,14 +33,63 @@ export function pickWinner(a, b) {
 }
 
 /**
- * Detect if an entry is a duplicate of existing entries
+ * Strong identity key for a book, if present. `work_key` (the OpenLibrary
+ * work key, also the friend-matching primitive) is preferred over `isbn13`.
+ * Returns null when neither is present (e.g. legacy or manually-typed
+ * entries), in which case the caller falls back to the content hash.
+ * @param {Object} entry
+ * @returns {string|null}
+ */
+function strongIdentityKey(entry) {
+  if (entry.work_key) return 'wk:' + entry.work_key;
+  if (entry.isbn13) return 'isbn:' + entry.isbn13;
+  return null;
+}
+
+/**
+ * Detect if an entry is a duplicate of existing entries.
+ *
+ * Dedup rule (BOOKISH-5): the legacy content hash is `title|author|format|
+ * dateRead`, which can FALSELY merge two distinct books that happen to share
+ * a generic title/author (e.g. two different self-published "Untitled" books).
+ * To fix that without regressing existing dedupe, strong identity keys
+ * (`work_key`, then `isbn13`) are used as a *tiebreaker around* the content
+ * hash rather than replacing it:
+ *
+ *   - If the payload AND a candidate BOTH carry a strong key, they are a
+ *     duplicate only when those strong keys MATCH. A content-hash collision
+ *     between two records whose strong keys differ is rejected (this is the
+ *     false-merge fix). A matching strong key still requires the same
+ *     format/dateRead via the content hash, preserving the existing rule that
+ *     the same book read in a different format / on a different date is a
+ *     distinct entry.
+ *   - If EITHER record lacks a strong key (one has isbn13, the other doesn't;
+ *     or both are legacy), the strong key is ignored and behavior falls back
+ *     to the pure content-hash match exactly as before — so books without
+ *     these keys (and a strong-key/weak-key pair for the genuinely same book)
+ *     still dedupe.
+ *
+ * Net effect: strictly *fewer* false merges; no entry that deduped before
+ * stops deduping. The change can only let more genuinely-distinct books
+ * through, never block a real add.
+ *
  * @param {Object} payload - Entry to check for duplication
  * @param {Array<Object>} existingEntries - Local entries to check against
  * @returns {Promise<Object|null>} - Existing entry if duplicate found (non-tombstoned), null otherwise
  */
 export async function detectDuplicate(payload, existingEntries) {
   const hash = await computeContentHash(payload);
-  const existing = existingEntries.find(e => e.contentHash === hash && e.status !== 'tombstoned');
+  const payloadKey = strongIdentityKey(payload);
+  const existing = existingEntries.find(e => {
+    if (e.contentHash !== hash || e.status === 'tombstoned') return false;
+    // Content hash matches. If BOTH records carry a strong identity key,
+    // require it to match too — this rejects false merges of distinct books
+    // that share a generic title/author. Otherwise (either side lacks a key),
+    // the content-hash match stands, preserving legacy behavior.
+    const candidateKey = strongIdentityKey(e);
+    if (payloadKey && candidateKey && payloadKey !== candidateKey) return false;
+    return true;
+  });
   return existing || null;
 }
 
@@ -111,7 +162,6 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
       const contentHash = await computeContentHash({
         title: r.title,
         author: r.author,
-        edition: r.edition,
         format: r.format,
         dateRead: r.dateRead
       });
@@ -131,23 +181,23 @@ export async function applyRemote(remoteList, tombstones, localEntries) {
       };
 
       if (supersededLocal) {
-        console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-prev');
+        debugLog('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-prev');
         toReplace.push({ prevId: supersededLocal.id, entry: newEntry });
       } else {
         const provisionalMatch = localPendingByHash.get(contentHash);
         if (provisionalMatch) {
-          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-provisional');
+          debugLog('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ replace-provisional');
           toReplace.push({ prevId: provisionalMatch.id, entry: newEntry });
           localPendingByHash.delete(contentHash);
         } else if (r.bookId && localByBookId.has(r.bookId)) {
           const localMatch = localByBookId.get(r.bookId);
           const wins = pickWinner(localMatch, newEntry) === newEntry;
-          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), 'bookId-match remote:', (newEntry.modifiedAt || 0), 'local:', (localMatch.modifiedAt || 0), '→', wins ? 'REPLACE' : 'skip');
+          debugLog('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), 'bookId-match remote:', (newEntry.modifiedAt || 0), 'local:', (localMatch.modifiedAt || 0), '→', wins ? 'REPLACE' : 'skip');
           if (wins) {
             toReplace.push({ prevId: localMatch.id, entry: newEntry });
           }
         } else {
-          console.log('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ add-new (bookId:', (r.bookId?.slice(0,8) || 'NONE'), ')');
+          debugLog('[Bookish:Cache] applyRemote', r.txid?.slice(0,8), '→ add-new (bookId:', (r.bookId?.slice(0,8) || 'NONE'), ')');
           toAdd.push(newEntry);
         }
       }
@@ -240,7 +290,7 @@ export function compactDuplicates(entries) {
       byBookId.set(e.bookId, keep);
       if (!toDelete.includes(drop.id)) {
         toDelete.push(drop.id);
-        console.log('[Bookish:Cache] Compacting duplicate bookId:', drop.bookId?.slice(0,8), 'dropping', drop.txid?.slice(0,8), 'keeping', keep.txid?.slice(0,8));
+        debugLog('[Bookish:Cache] Compacting duplicate bookId:', drop.bookId?.slice(0,8), 'dropping', drop.txid?.slice(0,8), 'keeping', keep.txid?.slice(0,8));
       }
     }
   }

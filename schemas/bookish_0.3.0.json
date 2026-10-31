@@ -1,0 +1,42 @@
+{
+  "$id": "https://your.repo/bookish/schemas/reading-0.3.0.json",
+  "title": "Bookish Reading v0.3.0",
+  "description": "Book reading entry stored on Arweave, keyed by wallet address",
+  "type": "object",
+  "required": ["schema", "version", "bookId", "title", "author", "format"],
+  "properties": {
+    "schema": { "const": "reading" },
+    "version": { "const": "0.3.0" },
+    "bookId": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "author": { "type": "string", "minLength": 1 },
+    "format": { "type": "string", "enum": ["paperback", "hardcover", "ebook", "audiobook", "other"] },
+    "dateRead": { "type": "number", "description": "JS millisecond epoch timestamp. Date-only values use noon UTC (YYYY-MM-DDT12:00:00.000Z)." },
+    "mimeType": { "type": "string" },
+    "coverImage": { "type": "string", "description": "base64-encoded image data" },
+    "coverFit": { "type": "string", "enum": ["cover", "contain"], "description": "Baseline object-fit mode for the stored cover image." },
+    "coverCrop": {
+      "type": "object",
+      "description": "Non-destructive normalized crop metadata for cover rendering.",
+      "properties": {
+        "v": { "type": "integer", "const": 1 },
+        "zoom": { "type": "number", "minimum": 1, "maximum": 3 },
+        "x": { "type": "number", "description": "Horizontal pan as a fraction of the cover tile width." },
+        "y": { "type": "number", "description": "Vertical pan as a fraction of the cover tile height." }
+      },
+      "required": ["v", "zoom", "x", "y"],
+      "additionalProperties": false
+    },
+    "readingStatus": { "type": "string", "enum": ["want_to_read", "reading", "read"], "default": "want_to_read", "description": "Reading status of the book" },
+    "readingStartedAt": { "type": "number", "description": "Timestamp when book was moved to reading status" },
+    "wtrPosition": { "type": "integer", "minimum": 0, "description": "Sort position within the want-to-read list (0 = top)" },
+    "work_key": { "type": "string", "description": "OpenLibrary work key (e.g., /works/OL5193815W). Used for friend-matching via strict equality. Captured at search time when the source is OL or iTunes-with-OL cross-reference." },
+    "isbn13": { "type": "string", "pattern": "^\\d{13}$", "description": "ISBN-13 of the chosen variant. Optional fallback identifier captured from search results when available." },
+    "is_private": { "type": "boolean", "description": "If true, the book is private — excluded from share-log publication and never shown to friends. Absent or false means public (default). Per-book privacy is the spine of the Friends feature; see FRIENDS.md Surface 7 (issue #129)." }
+  },
+  "allOf": [
+    { "if": { "required": ["coverImage"] }, "then": { "required": ["mimeType"] } }
+  ],
+  "additionalProperties": true,
+  "$comment": "Arweave tags: App-Name=Bookish, Type=reading, Pub-Addr=<walletAddress>"
+}

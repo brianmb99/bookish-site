@@ -1,5 +1,5 @@
 // search_core.js - Pure search logic extracted from book_search.js
-// Tokenization, scoring, filtering, sorting, OpenLibrary merge
+// Tokenization, scoring, filtering, sorting, book result merge
 
 const STOPWORDS = new Set(['the', 'and', 'of', 'a', 'an', 'to', 'in', 'on', 'for', 'by', 'with', 'at', 'from']);
 
@@ -16,8 +16,8 @@ export function baseTitle(query) {
   return idx > 2 ? query.slice(0, idx).trim() : query.trim();
 }
 
-// Merge two OpenLibrary doc lists, deduplicating by key
-export function mergeOpenLibrary(listA, listB) {
+// Merge two book doc lists, deduplicating by key
+export function mergeBookResults(listA, listB) {
   const map = new Map();
 
   function add(doc, src) {
@@ -120,29 +120,30 @@ export function passesFilter(item, activeFilter) {
 }
 
 // Deduplicate documents by normalized title+author key.
-// Groups variants, picks best display names, collects all covers/work keys.
+// Groups variants, picks best display names, collects all covers/work keys/editions.
 export function deduplicateByDisplay(docs) {
   const groups = new Map();
   docs.forEach(d => {
-    const key = displayKeyOpenLibrary(d);
+    const key = displayKeyBook(d);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(d);
   });
   return Array.from(groups.values()).map(group => {
-    group.sort((a, b) => (b._score || 0) - (a._score || 0) || (b.cover_i ? 1 : 0) - (a.cover_i ? 1 : 0));
+    group.sort((a, b) => (b._score || 0) - (a._score || 0) || ((b.cover_url || b.cover_i) ? 1 : 0) - ((a.cover_url || a.cover_i) ? 1 : 0));
     const rep = { ...group[0] };
     const authors = group.map(d => (d.author_name && d.author_name[0]) || '').filter(Boolean);
     if (authors.length) rep._bestAuthor = pickBestName(authors, 3);
     const titles = group.map(d => cleanTitle(d.title || '')).filter(Boolean);
     if (titles.length) rep._bestTitle = pickBestName(titles);
-    rep._allCovers = [...new Set(group.map(d => d.cover_i).filter(Boolean))];
+    rep._allCoverUrls = [...new Set(group.map(d => d.cover_url || d.cover_i).filter(Boolean))];
     rep._allWorkKeys = [...new Set(group.map(d => d.key).filter(Boolean))];
+    rep._editions = group.slice();
     return rep;
   });
 }
 
-/** Normalized title|author key for an OpenLibrary work. */
-export function displayKeyOpenLibrary(doc) {
+/** Normalized title|author key for a book result. */
+export function displayKeyBook(doc) {
   const title = normalizeTitleKey(doc.title || '');
   const author = normalizeAuthorKey((doc.author_name && doc.author_name[0]) || '');
   return `${title}|${author}`;
@@ -175,12 +176,12 @@ export function deduplicateItunesByDisplay(items) {
 }
 
 /**
- * Drop OpenLibrary works that match any iTunes result.
- * Full key match (title+author), or title-only match when OL has no author.
- * Transfers _allWorkKeys and _allCovers from suppressed OL docs to the
+ * Drop book results that match any iTunes result.
+ * Full key match (title+author), or title-only match when book has no author.
+ * Transfers _allWorkKeys and _allCoverUrls from suppressed book docs to the
  * matching iTunes item so cover browsing can use them.
  */
-export function filterOlSupersededByItunes(olDocs, itunesItems) {
+export function filterBooksSupersededByItunes(bookDocs, itunesItems) {
   const keyToItunes = new Map();
   const titleToItunes = new Map();
   (itunesItems || []).forEach(i => {
@@ -190,27 +191,27 @@ export function filterOlSupersededByItunes(olDocs, itunesItems) {
     if (!titleToItunes.has(tk)) titleToItunes.set(tk, i);
   });
 
-  function transferOlData(olDoc, itItem) {
+  function transferBookData(bookDoc, itItem) {
     if (!itItem) return;
     if (!itItem._olWorkKeys) itItem._olWorkKeys = [];
-    if (!itItem._olCovers) itItem._olCovers = [];
-    const wks = olDoc._allWorkKeys && olDoc._allWorkKeys.length ? olDoc._allWorkKeys : (olDoc.key ? [olDoc.key] : []);
-    const cvs = olDoc._allCovers && olDoc._allCovers.length ? olDoc._allCovers : (olDoc.cover_i ? [olDoc.cover_i] : []);
+    if (!itItem._olCoverUrls) itItem._olCoverUrls = [];
+    const wks = bookDoc._allWorkKeys && bookDoc._allWorkKeys.length ? bookDoc._allWorkKeys : (bookDoc.key ? [bookDoc.key] : []);
+    const cvs = bookDoc._allCoverUrls && bookDoc._allCoverUrls.length ? bookDoc._allCoverUrls : (bookDoc.cover_url ? [bookDoc.cover_url] : bookDoc.cover_i ? [bookDoc.cover_i] : []);
     wks.forEach(k => { if (!itItem._olWorkKeys.includes(k)) itItem._olWorkKeys.push(k); });
-    cvs.forEach(c => { if (!itItem._olCovers.includes(c)) itItem._olCovers.push(c); });
+    cvs.forEach(c => { if (!itItem._olCoverUrls.includes(c)) itItem._olCoverUrls.push(c); });
   }
 
-  return (olDocs || []).filter(d => {
-    const olKey = displayKeyOpenLibrary(d);
-    if (keyToItunes.has(olKey)) {
-      transferOlData(d, keyToItunes.get(olKey));
+  return (bookDocs || []).filter(d => {
+    const bookKey = displayKeyBook(d);
+    if (keyToItunes.has(bookKey)) {
+      transferBookData(d, keyToItunes.get(bookKey));
       return false;
     }
     const authorRaw = (d.author_name && d.author_name[0]) || '';
     if (!authorRaw.trim()) {
       const tk = normalizeTitleKey(d.title || '');
       if (titleToItunes.has(tk)) {
-        transferOlData(d, titleToItunes.get(tk));
+        transferBookData(d, titleToItunes.get(tk));
         return false;
       }
     }
@@ -288,17 +289,144 @@ export function cleanTitle(title) {
 }
 
 // Detect if query is an ISBN (10 or 13 digits, with optional hyphens/spaces)
-// Returns { isISBN, isbn, isbnUrl } or { isISBN: false }
+// Returns { isISBN, isbn } or { isISBN: false }
 export function detectISBN(query) {
   const digits = query.replace(/[\s-]/g, '');
   if (/^\d{10}$/.test(digits) || /^\d{13}$/.test(digits)) {
-    return {
-      isISBN: true,
-      isbn: digits,
-      isbnUrl: `https://openlibrary.org/isbn/${digits}.json`
-    };
+    return { isISBN: true, isbn: digits };
   }
   return { isISBN: false };
+}
+
+/**
+ * Filter normalized book docs to those with unique covers matching the given title.
+ * Deduplicates by cover URL (ignoring zoom parameter) so the same cover image
+ * from different editions isn't shown twice. Requires ≥75% token overlap with title.
+ */
+export function filterCoverMatches(docs, title) {
+  const workTokens = tokenize(title || '');
+  const seen = new Set();
+  return (docs || []).filter(e => {
+    if (!e.cover_url) return false;
+    // Deduplicate by cover URL (strip zoom param to compare base image)
+    const coverKey = e.cover_url.replace(/&?zoom=\d+/, '');
+    if (seen.has(coverKey)) return false;
+    seen.add(coverKey);
+    if (!workTokens.length) return true;
+    const edLower = ((e.title || '') + (e.subtitle ? ' ' + e.subtitle : '')).toLowerCase();
+    let hits = 0;
+    workTokens.forEach(t => { if (edLower.includes(t)) hits++; });
+    return hits / workTokens.length >= 0.75;
+  });
+}
+
+/**
+ * Convert an ISBN-13 (978-prefix) to ISBN-10.
+ * Returns the 10-char string or null if not a 978-prefix ISBN-13.
+ */
+export function convertISBN13to10(isbn13) {
+  if (!isbn13) return null;
+  const digits = isbn13.replace(/[\s-]/g, '');
+  if (digits.length !== 13 || !digits.startsWith('978')) return null;
+  const body = digits.slice(3, 12); // 9 digits
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(body[i], 10) * (10 - i);
+  }
+  const rem = (11 - (sum % 11)) % 11;
+  const check = rem === 10 ? 'X' : String(rem);
+  return body + check;
+}
+
+/**
+ * Extract unique ISBN-10 values from an array of OL edition objects.
+ * Handles isbn_10 and isbn_13 fields, deduplicates results.
+ */
+export function extractISBN10s(editions) {
+  if (!editions || !editions.length) return [];
+  const set = new Set();
+  for (const ed of editions) {
+    if (Array.isArray(ed.isbn_10)) {
+      for (const raw of ed.isbn_10) {
+        const clean = (raw || '').replace(/[\s-]/g, '');
+        if (clean.length === 10) set.add(clean);
+      }
+    }
+    if (Array.isArray(ed.isbn_13)) {
+      for (const raw of ed.isbn_13) {
+        const converted = convertISBN13to10(raw);
+        if (converted) set.add(converted);
+      }
+    }
+  }
+  return Array.from(set);
+}
+
+/**
+ * Build an Amazon CDN cover URL from an ISBN-10.
+ */
+export function amazonCoverUrl(isbn10) {
+  return `https://images-na.ssl-images-amazon.com/images/P/${isbn10}.01._SCLZZZZZZZ_.jpg`;
+}
+
+/**
+ * Build an OpenLibrary cover-by-ISBN URL.
+ */
+export function olCoverByISBN(isbn10) {
+  return `https://covers.openlibrary.org/b/isbn/${isbn10}-L.jpg`;
+}
+
+/**
+ * Rank a cover object { url, width, height, source } for quality sorting.
+ * Higher score = better. Portrait Amazon covers ranked highest.
+ * Aspect ratio threshold: height/width >= 1.18 (~2:3 ratio) counts as portrait.
+ */
+export function rankCover(cover) {
+  if (!cover) return 0;
+  const isPortrait = cover.width && cover.height && (cover.height / cover.width) >= 1.18;
+  const isAmazon = cover.source === 'amazon';
+  if (isPortrait && isAmazon) return 4;
+  if (isPortrait) return 3;
+  if (isAmazon) return 2;
+  return 1;
+}
+
+/**
+ * Card aspect ratio (height / width) for the 2:3 cover display.
+ */
+export const CARD_RATIO = 1.5;
+
+/**
+ * Compute how well a cover fills the 2:3 card with object-fit:contain.
+ * Returns 0.0–1.0 where 1.0 = perfect fill (no letterboxing).
+ */
+export function coverFitScore(width, height) {
+  if (!width || !height) return 0;
+  const ratio = height / width;
+  return ratio >= CARD_RATIO ? CARD_RATIO / ratio : ratio / CARD_RATIO;
+}
+
+/**
+ * Determine CSS object-fit mode for a cover.
+ * Returns 'cover' if ≥90% fill (safe to crop), else 'contain'.
+ */
+export function coverFitMode(width, height) {
+  return coverFitScore(width, height) >= 0.90 ? 'cover' : 'contain';
+}
+
+/**
+ * Sort comparator for editions: rank desc → fit score desc → resolution desc.
+ */
+export function coverSortComparator(a, b) {
+  const rankDiff = (b._rank || 0) - (a._rank || 0);
+  if (rankDiff !== 0) return rankDiff;
+  const fitA = a._coverData ? coverFitScore(a._coverData.width, a._coverData.height) : 0;
+  const fitB = b._coverData ? coverFitScore(b._coverData.width, b._coverData.height) : 0;
+  const fitDiff = fitB - fitA;
+  if (Math.abs(fitDiff) > 0.001) return fitDiff;
+  const resA = (a._coverData?.width || 0) * (a._coverData?.height || 0);
+  const resB = (b._coverData?.width || 0) * (b._coverData?.height || 0);
+  return resB - resA;
 }
 
 // Parse "Title by Author" or natural language queries into components

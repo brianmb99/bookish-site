@@ -13,6 +13,33 @@ export const PRIORITY = {
   AMBIENT: 4    // Default background state (synced, ready)
 };
 
+export function friendlySyncErrorMessage(error) {
+  const msg = String(error || '').toLowerCase();
+  const safeRetry = 'Your books are safe on this device — we’ll keep retrying.';
+
+  if (/timeout|timed out|aborterror|aborted|econnaborted|gateway timeout|http\s*(408|504|522|524)\b|\b(408|504|522|524)\b/.test(msg)) {
+    return `Sync is taking too long, likely from a slow or unstable connection. ${safeRetry}`;
+  }
+
+  if (/offline|failed to fetch|fetch failed|network|load failed|internet disconnected|err_internet|dns|enotfound|econnreset|networkerror/.test(msg)) {
+    return `Couldn’t reach the server. ${safeRetry}`;
+  }
+
+  if (/cors|cross-origin|blocked|forbidden|cloudflare|challenge|captcha|http\s*(401|403|1020)\b|\b(401|403|1020)\b|unauthori[sz]ed|jwt|token|session/.test(msg)) {
+    return `Sync may be blocked or your session may need a refresh. ${safeRetry}`;
+  }
+
+  if (/rate limit|too many requests|http\s*429\b|\b429\b/.test(msg)) {
+    return `The server is rate-limiting sync right now. ${safeRetry}`;
+  }
+
+  if (/server|service unavailable|bad gateway|internal|http\s*5\d\d\b|\b5\d\d\b/.test(msg)) {
+    return `The sync server is having trouble right now. ${safeRetry}`;
+  }
+
+  return `Sync is having trouble right now. ${safeRetry}`;
+}
+
 /**
  * UI Status Manager
  * Coordinates status text and visual indicators across the app
@@ -30,17 +57,17 @@ class UIStatusManager {
     // Status provider functions (set by init())
     this.getAccountStatus = null;
     this.getSyncStatus = null;
-    this.getBalanceStatus = null;
+    this.getAppErrorStatus = null;
   }
 
   /**
    * Initialize with status provider functions
-   * @param {Object} providers - { getAccountStatus, getSyncStatus, getBalanceStatus }
+   * @param {Object} providers - { getAccountStatus, getSyncStatus, getAppErrorStatus }
    */
   init(providers) {
     this.getAccountStatus = providers.getAccountStatus || (() => ({}));
     this.getSyncStatus = providers.getSyncStatus || (() => ({}));
-    this.getBalanceStatus = providers.getBalanceStatus || (() => ({}));
+    this.getAppErrorStatus = providers.getAppErrorStatus || (() => ({}));
 
     // Initial status calculation
     this._recalculateStatus();
@@ -71,7 +98,7 @@ class UIStatusManager {
     // Query current state from all providers (with null safety)
     const account = this.getAccountStatus ? this.getAccountStatus() : {};
     const sync = this.getSyncStatus ? this.getSyncStatus() : {};
-    const balance = this.getBalanceStatus ? this.getBalanceStatus() : {};
+    const balance = this.getAppErrorStatus ? this.getAppErrorStatus() : {};
 
     // Decision tree: evaluate in priority order
     const status = this._determineStatus(account, sync, balance);
@@ -96,14 +123,15 @@ class UIStatusManager {
       };
     }
 
-    if (sync.error) {
-      const friendly = sync.error.toLowerCase().includes('fetch')
-        ? 'Couldn\u2019t reach the server. Your books are safe \u2014 we\u2019ll retry when you\u2019re back online.'
-        : sync.error;
+    // Gate on 2+ consecutive failed cycles (#237): a single blip that
+    // recovers next cycle never surfaces. failureCount missing (older
+    // provider shape) falls back to surfacing on any error.
+    if (sync.error && (sync.failureCount === undefined || sync.failureCount >= 2)) {
+      // Never surface raw error strings (SDK/crypto internals) in the header.
       return {
-        message: friendly,
+        message: friendlySyncErrorMessage(sync.error),
         priority: PRIORITY.CRITICAL,
-        maxDisplay: 10000
+        maxDisplay: 0 // persists until the state changes (next cycle recalc)
       };
     }
 
@@ -221,6 +249,19 @@ class UIStatusManager {
           statusEl.classList.add('warning');
         } else {
           statusEl.classList.remove('warning');
+        }
+      }
+
+      // CRITICAL messages get the visible banner below the header (#237) —
+      // the legacy #status header div has been display:none since the
+      // omnibox redesign, so it cannot carry user-facing errors.
+      const bannerEl = document.getElementById('syncErrorBanner');
+      if (bannerEl) {
+        if (priority === PRIORITY.CRITICAL && message) {
+          bannerEl.textContent = message;
+          bannerEl.hidden = false;
+        } else {
+          bannerEl.hidden = true;
         }
       }
 
