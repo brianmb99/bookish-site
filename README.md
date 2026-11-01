@@ -7,4 +7,4 @@ Source code, tests, tools, and private utilities live in a separate private repo
 Do not edit files here directly; changes will be overwritten on next publish.
 Releases are promoted from brianmb99/bookish-site-dev by its Release production workflow.
 
-Version: v0.2.445 (SW v538) from bookish-site-dev 8381e1b
+Version: v0.2.447 (SW v540) from bookish-site-dev 9629d37
